@@ -4,7 +4,7 @@ version = "0.0.0"
 publish = false
 edition = "2021"
 license = "MIT"
-description = "cargo-fuzz targets for the SoroWill will contract"
+description = "cargo-fuzz targets for the Williams will contract"
 
 # Its own workspace: this crate needs a nightly toolchain and libFuzzer, and
 # must not be dragged into the stable `cargo test --workspace` build.

@@ -1,7 +1,7 @@
-//! Contract events published by SoroWill.
+//! Contract events published by Williams.
 //!
 //! Every state-changing entry point publishes exactly one event so that
-//! off-chain indexers (such as the SoroWill SDK/app) can reconstruct will
+//! off-chain indexers (such as the Williams SDK/app) can reconstruct will
 //! history without re-simulating transactions. That includes the guardian
 //! consent transitions: [`guardian_accepted_role`] and
 //! [`guardian_rejected_role`] report when a named guardian becomes eligible to

@@ -5,7 +5,7 @@ contract's public interface: every entry-point function signature, and the
 `Will`, `Beneficiary`, `Guardian`, `WillStatus`, and `WillError` types as
 they are actually compiled into the deployed WASM.
 
-Consumers such as [`sorowill-sdk`](https://github.com/SoroWill/sorowill-sdk)
+Consumers such as [`williams-sdk`](https://github.com/Williams/williams-sdk)
 diff their hand-maintained TypeScript types and XDR encoders against this
 file to detect spec drift before it ships.
 

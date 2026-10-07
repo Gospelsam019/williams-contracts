@@ -1,6 +1,6 @@
-<img src="./docs/logo.svg" alt="SoroWill" width="56" height="56" />
+<img src="./docs/logo.svg" alt="Williams" width="56" height="56" />
 
-# SoroWill Contracts
+# Williams-contracts
 
 **Trustless on-chain inheritance on Stellar Soroban**
 
@@ -10,11 +10,11 @@
 [![Security Policy](https://img.shields.io/badge/Security-Policy-blue.svg)](./SECURITY.md)
 [![Stellar Testnet](https://img.shields.io/badge/Stellar-Testnet-08b5e5?logo=stellar)](https://developers.stellar.org/docs/networks)
 
-**Live app: [sorowill.vercel.app](https://sorowill.vercel.app/)**
+**Live app: [williams.vercel.app](https://williams.vercel.app/)**
 
-## What is SoroWill
+## What is Williams
 
-SoroWill is a trustless, on-chain inheritance protocol for Stellar Soroban. It lets anyone lock USDC (or any SEP-41 compliant token) into a smart contract, name beneficiaries with percentage splits, and set a check-in period. If the owner stops checking in, the contract automatically releases the funds to the beneficiaries after a grace period — no lawyer, no court, no middleman.
+Williams is a trustless, on-chain inheritance protocol for Stellar Soroban. It lets anyone lock USDC (or any SEP-41 compliant token) into a smart contract, name beneficiaries with percentage splits, and set a check-in period. If the owner stops checking in, the contract automatically releases the funds to the beneficiaries after a grace period — no lawyer, no court, no middleman.
 
 ## How it works
 
@@ -46,8 +46,8 @@ rustup target add wasm32v1-none
 cargo install --locked stellar-cli
 
 # Clone and test
-git clone https://github.com/SoroWill/sorowill-contracts.git
-cd sorowill-contracts
+git clone https://github.com/Williams/williams-contracts.git
+cd williams-contracts
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
@@ -241,7 +241,7 @@ id"** — it cannot distinguish a will that exists but needs to be restored (or
 was explicitly archived) from one that never existed. This is documented on
 `storage::load_will` and the `get_will` entry point; a dedicated
 `WillArchived` error code is deferred until the SDK exposes an archived-entry
-probe. See [issue #166](https://github.com/SoroWill/sorowill-contracts/issues/166)
+probe. See [issue #166](https://github.com/Williams/williams-contracts/issues/166)
 for the full context.
 
 ### What `archive_will` removes
@@ -260,7 +260,7 @@ which is append-only and never trimmed; the archived `Will` itself keeps the
 final status, balances, and parties until Soroban's state archival collects it.
 In particular, `get_will_history` returns an empty trail for an archived will
 and must not be used as a post-archival recovery path. See
-[issue #393](https://github.com/SoroWill/sorowill-contracts/issues/393).
+[issue #393](https://github.com/Williams/williams-contracts/issues/393).
 
 ## Error codes
 
@@ -335,7 +335,7 @@ A versioned, machine-readable export of the contract's public interface —
 every entry-point signature plus the `Will`, `Beneficiary`, `Guardian`,
 `WillStatus`, and `WillError` types — is committed under
 [`spec/`](./spec) as `will-v<crate-version>.json`. It's how
-[`sorowill-sdk`](https://github.com/SoroWill/sorowill-sdk) detects when its
+[`williams-sdk`](https://github.com/Williams/williams-sdk) detects when its
 TypeScript types and XDR encoders have drifted from the deployed contract.
 
 Regenerate it after any change to a public entry point or shared type:

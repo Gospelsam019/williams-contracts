@@ -2,7 +2,7 @@
 
 Soroban meters every invocation and bills for it: CPU instructions, the number
 of ledger entries touched, their size in bytes, and rent for keeping persistent
-entries alive. This document records what each SoroWill entry point costs, how
+entries alive. This document records what each Williams entry point costs, how
 to measure it yourself, and the reasoning behind the storage layout decisions
 that drive those numbers.
 

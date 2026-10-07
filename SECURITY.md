@@ -1,6 +1,6 @@
 # Security Policy
 
-The SoroWill team takes the security of our smart contracts and protocol infrastructure seriously. As a protocol managing trustless inheritance and user funds on Stellar Soroban, we encourage responsible disclosure of any security vulnerabilities.
+The Williams team takes the security of our smart contracts and protocol infrastructure seriously. As a protocol managing trustless inheritance and user funds on Stellar Soroban, we encourage responsible disclosure of any security vulnerabilities.
 
 ---
 
@@ -23,11 +23,11 @@ Only the latest code on the `main` branch and currently active deployments are a
 If you discover a security vulnerability, please report it privately using one of the following methods:
 
 1. **GitHub Private Vulnerability Reporting (Preferred)**:
-   - Navigate to the [Security Advisories](https://github.com/SoroWill/sorowill-contracts/security/advisories) tab of the repository.
+   - Navigate to the [Security Advisories](https://github.com/Williams/williams-contracts/security/advisories) tab of the repository.
    - Click **"Report a vulnerability"** to submit a confidential report directly to the maintainers.
 
 2. **Email Disclosure**:
-   - If Private Vulnerability Reporting is unavailable, send your findings to `security@sorowill.org`.
+   - If Private Vulnerability Reporting is unavailable, send your findings to `security@williams.org`.
    - Include a detailed description of the vulnerability, steps or proof-of-concept (PoC) code to reproduce it, and the potential impact on user funds or contract execution.
 
 ### Expected Response SLAs

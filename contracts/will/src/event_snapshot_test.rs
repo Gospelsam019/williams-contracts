@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-//! Consolidated regression/snapshot test for all SoroWill contract events.
+//! Consolidated regression/snapshot test for all Williams contract events.
 //!
 //! This test exercises every event-emitting contract entry point at least once,
 //! verifying the event topic, payload structure, and event ordering. This provides

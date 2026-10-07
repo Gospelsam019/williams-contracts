@@ -1,4 +1,4 @@
-# Fuzzing SoroWill
+# Fuzzing Williams
 
 The contract is fuzzed at two depths, both driving the same harness
 ([`contracts/will/src/fuzz_harness.rs`](../contracts/will/src/fuzz_harness.rs)):

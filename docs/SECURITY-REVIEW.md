@@ -1,4 +1,4 @@
-# Security Review Report — SoroWill Contract
+# Security Review Report — Williams Contract
 
 **Date:** 2026-07-27
 **Contract version:** 1.0.0 (`CONTRACT_VERSION = 1_000_000`, git ref: `main` as of 2026-07-27)

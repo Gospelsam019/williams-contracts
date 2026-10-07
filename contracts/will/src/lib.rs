@@ -10,7 +10,7 @@
 // when placed on the source function or the impl block, so it's set crate-wide.
 #![allow(clippy::too_many_arguments)]
 
-//! SoroWill — a trustless on-chain inheritance and dead man's switch protocol
+//! Williams — a trustless on-chain inheritance and dead man's switch protocol
 //! for Stellar Soroban.
 //!
 //! An owner locks one or more tokens (e.g. USDC, XLM, any SEP-41 asset) into
@@ -371,7 +371,7 @@ mod issue_490_493_test;
 mod update_will_settings_test;
 #[cfg(test)]
 mod wills_by_owner_status_test;
-#[cfg(test)]
+// #[cfg(test)]
 // mod issue_486_489_test; // TODO: ContractEvents API
 
 use soroban_sdk::{
@@ -543,7 +543,7 @@ soroban_sdk::contractmeta!(
 soroban_sdk::contractmeta!(key = "Version", val = "1.3.0");
 soroban_sdk::contractmeta!(
     key = "Homepage",
-    val = "https://github.com/SoroWill/sorowill-contracts"
+    val = "https://github.com/Williams/williams-contracts"
 );
 
 #[contract]

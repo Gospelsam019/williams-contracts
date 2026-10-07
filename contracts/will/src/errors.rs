@@ -1,6 +1,6 @@
 use soroban_sdk::contracterror;
 
-/// Errors returned by the SoroWill contract.
+/// Errors returned by the Williams contract.
 ///
 /// Every error variant is surfaced to callers as a `#[contracterror]` so that
 /// SDK and client code can match on a stable numeric code instead of parsing

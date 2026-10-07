@@ -1,4 +1,4 @@
-# Contributing to sorowill-contracts
+# Contributing to williams-contracts
 
 This repo participates in the **Stellar Wave Program** on [Drips](https://drips.network/wave). Contribution work is tied to issues that maintainers tag for an active Wave, and contributors earn rewards proportional to the Points assigned to the issues they resolve.
 

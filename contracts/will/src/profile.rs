@@ -115,7 +115,7 @@ impl Report {
     /// Prints the profile as a Markdown table, ready to paste into a PR.
     fn print(&self) {
         println!(
-            "\nSoroWill resource profile ({PROFILE_BENEFICIARIES} beneficiaries, 2 guardians)\n"
+            "\nWilliams resource profile ({PROFILE_BENEFICIARIES} beneficiaries, 2 guardians)\n"
         );
         println!(
             "| entry point | instructions | read entries | write entries | read bytes | write bytes | rent ledger-bytes | fee (stroops) |"

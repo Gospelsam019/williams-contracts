@@ -1,4 +1,4 @@
-# Task runner for sorowill-contracts.
+# Task runner for williams-contracts.
 #
 # Install `just`: https://github.com/casey/just#installation
 # Then run `just --list` to see all recipes, or `just <recipe>`.

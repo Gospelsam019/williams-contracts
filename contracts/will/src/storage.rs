@@ -1,4 +1,4 @@
-//! Persistent storage helpers for the SoroWill contract.
+//! Persistent storage helpers for the Williams contract.
 //!
 //! All will state lives in persistent storage keyed by a `DataKey`. Owner and
 //! beneficiary indexes are maintained as `Vec<u64>` of will ids so the

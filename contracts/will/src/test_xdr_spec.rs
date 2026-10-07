@@ -11,7 +11,7 @@
 //! the macro to emit a different XDR blob, which will differ from the fixture
 //! and fail this test. This surfaces schema drift between the contract and any
 //! SDK or client that encodes `create_will` arguments independently
-//! (e.g. sorowill-sdk — see companion spec-drift-check in sorowill-sdk#101).
+//! (e.g. williams-sdk — see companion spec-drift-check in williams-sdk#101).
 //!
 //! # Updating the fixture
 //!
@@ -23,7 +23,7 @@
 //!
 //! That test prints the new hex and writes it into the fixture file. Commit
 //! both the code change and the updated fixture in the same PR. Coordinate
-//! with the SDK repo (sorowill-sdk#101) so both sides stay in sync.
+//! with the SDK repo (williams-sdk#101) so both sides stay in sync.
 
 #![cfg(test)]
 
@@ -85,7 +85,7 @@ fn test_spec_fixture_create_will() {
          to update the fixture, then commit the updated \
          src/fixtures/create_will_spec.txt alongside your code change.\n\
          \n\
-         Also coordinate with sorowill-sdk#101 so the SDK's expected encoding \
+         Also coordinate with williams-sdk#101 so the SDK's expected encoding \
          is updated in the same release window.\n"
     );
 }

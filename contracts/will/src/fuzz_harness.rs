@@ -1,4 +1,4 @@
-//! Shared fuzzing harness for the SoroWill contract.
+//! Shared fuzzing harness for the Williams contract.
 //!
 //! The harness is deliberately independent of any particular fuzzing engine.
 //! It exposes plain, `Env`-free input structs plus a *runner* per entry point
@@ -128,7 +128,7 @@ pub enum Outcome {
 /// Reports an invariant violation, printing the offending input so both
 /// libFuzzer artifacts and `proptest` failures are directly reproducible.
 fn violation(input: &impl core::fmt::Debug, message: &str) -> ! {
-    panic!("SoroWill invariant violation: {message}\n  input: {input:#?}");
+    panic!("Williams invariant violation: {message}\n  input: {input:#?}");
 }
 
 /// Asserts `condition`, reporting `message` and the input if it does not hold.

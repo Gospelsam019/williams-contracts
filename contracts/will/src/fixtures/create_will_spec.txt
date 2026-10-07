@@ -24,7 +24,7 @@
 #
 # SDK COORDINATION
 # ----------------
-# The sorowill-sdk repo has a companion spec-drift-check (see sorowill-sdk
+# The williams-sdk repo has a companion spec-drift-check (see williams-sdk
 # issue #101). When this fixture changes, update the SDK's expected spec
 # fixture in the same PR or open a coordinated follow-up PR there. Reference
 # that PR in the description here so reviewers can verify both sides match.

@@ -309,5 +309,5 @@ up-to-date interface.
   coverage-guided + property-based fuzzing suite (`docs/FUZZING.md`)
   covering `create_will` and `update_beneficiaries`.
 
-[Unreleased]: https://github.com/SoroWill/sorowill-contracts/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/SoroWill/sorowill-contracts/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Williams/williams-contracts/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Williams/williams-contracts/releases/tag/v0.1.0
