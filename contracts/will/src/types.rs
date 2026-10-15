@@ -376,6 +376,24 @@ pub struct Will {
     /// When set, a portion of the inheritance is paid to callers who trigger
     /// or release the will (not to the owner). Defaults to 0.
     pub keeper_bounty_bps: u32,
+    /// Which token the keeper bounty is paid from (#109).
+    ///
+    /// `None` — the default, and what every creation path stores — deducts
+    /// the bounty proportionally from **every** token the will holds: each
+    /// token contributes `floor(balance * keeper_bounty_bps / 10_000)` of
+    /// itself. A keeper's incentive therefore scales with the estate's whole
+    /// value instead of an arbitrarily chosen first token: an estate holding
+    /// 1 XLM and 100,000 USDC pays 1% of each, not 1% of the XLM alone.
+    ///
+    /// `Some(token)` concentrates the whole bounty on that one token, so the
+    /// owner can target the asset keepers actually want (typically the native
+    /// asset, so the bounty covers the keeper's gas). The token must be one
+    /// the will holds; if its bounty share rounds to zero, `distribute`
+    /// falls back to the proportional split so a dust-sized target can never
+    /// leave the keeper unpaid while the will holds value elsewhere.
+    ///
+    /// Set through [`crate::WillContract::set_keeper_bounty_token`].
+    pub keeper_bounty_token: Option<Address>,
     /// Optional delegate address that may call `check_in` on the owner's
     /// behalf. `None` means only the owner can check in.
     pub delegate: Option<Address>,

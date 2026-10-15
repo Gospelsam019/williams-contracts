@@ -18,7 +18,8 @@ data, in order.
 | `triggered` | `trigger_will` | `grace_period_ends: u64` |
 | `emerg` | `emergency_checkin` | `(owner: Address, next_deadline: u64)` |
 | `released` | `release_inheritance`, `guardian_trigger` (on quorum) | `(token_count: u32, beneficiaries_count: u32)` |
-| `bounty` | `release_inheritance`, `guardian_trigger` (keeper bounty paid) | `(keeper: Address, amount: i128)` |
+| `bounty` | `release_inheritance`, `guardian_trigger` (keeper bounty paid) | `(keeper: Address, amount: i128)` — published once per token the bounty was paid from; with the default proportional selection (#109) that is one event per held token whose share rounds above zero. |
+| `bountytok` | `set_keeper_bounty_token` | `token: Option<Address>` — `Some(t)` targets the whole bounty at `t`, `None` restores the default proportional split (#109). |
 | `cancelled` | `cancel_will` | `(owner: Address, token_count: u32)` |
 | `closed` | `close_will` | `owner: Address` |
 | `archived` | `archive_will` | `(owner: Address, timestamp: u64, reason: Symbol)` |

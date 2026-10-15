@@ -78,7 +78,7 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// transformation in `WillContract::migrate_will`; a bump on its own would
 /// make `migrate_will` no-op on every will and the version stamp would stop
 /// meaning anything (#367).
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 #[contracttype]
 #[derive(Clone)]

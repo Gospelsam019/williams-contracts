@@ -225,4 +225,9 @@ pub enum WillError {
     /// would wipe those votes and let a fresh trigger bypass a cancel that was
     /// accumulating against it, so the update is refused (#488).
     GuardianCancelInProgress = 53,
+    /// `set_keeper_bounty_token` was called with a token the will does not
+    /// currently hold. The bounty is carved out of a balance the will holds,
+    /// so naming any other token could never pay from it and would silently
+    /// degrade to no bounty at all (#109).
+    InvalidBountyToken = 54,
 }
