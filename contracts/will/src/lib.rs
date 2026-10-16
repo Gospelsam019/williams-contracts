@@ -4761,7 +4761,10 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         // Validate the new slot before mutating the will, so a rejected call
-        // leaves no partial state behind (#371).
+        // leaves no partial state behind (#371). The length check lives in
+        // `assert_valid_hashed_beneficiary` and reports the dedicated
+        // `InvalidCommitmentLength`; a second, earlier length check here used
+        // to shadow it with the generic `InvalidPreimage`.
         assert_valid_hashed_beneficiary(&env, &will.hashed_beneficiaries, &commitment, percentage);
 
         will.hashed_beneficiaries.push_back(HashedBeneficiary {
@@ -5676,49 +5679,6 @@ fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: 
     }
 }
 
-/// Distributes all token balances across `will.beneficiaries` proportionally
-/// to their basis-point shares, transfers the shares out of the contract,
-/// clears the balances map, marks the will `Released`, and publishes the
-/// `InheritanceReleased` event.
-///
-/// # Rounding Behavior
-///
-/// Each token's distribution is calculated as: `share = balance * (basis_points / 10_000)`.
-/// Integer division truncates toward zero, which may result in zero shares for
-/// beneficiaries with very small calculated amounts. For example, distributing 9 units
-/// equally among 10 beneficiaries (900 basis points each) gives each person 0.9 units,
-/// which truncates to 0.
-///
-/// To ensure no dust is left behind, any rounding remainder is paid to the final
-/// beneficiary in the list. This guarantees the full balance of every token is
-/// always distributed across beneficiaries.
-///
-/// **Note:** Callers should ensure that the will's balance is sufficient to give
-/// each beneficiary at least 1 unit of their share. Extremely small balances relative
-/// to beneficiary counts can result in most recipients getting zero after rounding.
-/// Consider validating a minimum will amount at creation time (see issue #37).
-/// Splits `will.balance` across `will.beneficiaries` proportionally to their
-/// percentages, transfers the shares out of the contract, marks the will
-/// `Released`, and publishes the `InheritanceReleased` event with a full
-/// For each token in `will.balances`, splits the balance across
-/// `will.beneficiaries` proportionally to their basis-point shares, transfers
-/// the shares out of the contract, clears the balances map, marks the will
-/// `Released`, and publishes the `InheritanceReleased` event. Any rounding
-/// remainder from integer division is paid to the final beneficiary so the
-/// full balance of every token is always distributed with no dust left behind.
-///
-/// Any keeper bounty is deducted from the first token's balance before the
-/// beneficiary split, and for every token the planned payouts (bounty plus
-/// shares) must sum to exactly that token's balance, otherwise the release
-/// aborts with [`WillError::DistributionMismatch`] (#456). A will whose
-/// beneficiaries are all `FixedAmount` pays any leftover to the final
-/// beneficiary. `distribute` refuses to run for a will that is no longer
-/// `Active` or `Triggered`, so a will can never be paid out twice (#458).
-///
-/// Follows checks-effects-interactions ordering: all per-beneficiary share
-/// amounts are computed from the pre-mutation balances, then all state is
-/// committed (status, balances, indexes), and only then are the external
-/// token transfers executed.
 /// Calculates `floor(total * basis_points / 10_000)` without ever forming
 /// the potentially overflowing `total * basis_points` intermediate. The
 /// workspace release profile enables overflow checks, but this decomposition
@@ -5812,6 +5772,16 @@ fn collect_proportional_bounties(plan: &mut Map<Address, i128>, will: &Will) {
 /// the will's owner and reported via [`events::leftover_refunded`] (#383).
 /// The refund is a no-op for wills that do have percentage beneficiaries,
 /// since the last one already absorbs the whole remainder.
+///
+/// # Conservation
+///
+/// For every token, the keeper bounty, the planned beneficiary shares, the
+/// owner refund and the hashed-beneficiary reserve together must account for
+/// exactly that token's balance; anything else aborts the release with
+/// [`WillError::DistributionMismatch`] (#456). The bounty is deducted before
+/// the split, the reserve is withheld in `will.balances` for
+/// `reveal_and_claim`, and the refund is paid to the owner — each is a
+/// legitimate disposition of the balance, so each is part of the sum.
 ///
 /// Follows checks-effects-interactions ordering: all per-beneficiary share
 /// amounts (and the owner refund) are computed from the pre-mutation
@@ -5924,8 +5894,15 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             }
         }
 
+        // The reserve for still-unclaimed hashed beneficiaries is withheld
+        // from the visible split and left in `will.balances` for
+        // `reveal_and_claim` (#181). It is *not* paid out here, so the
+        // conservation check below must count it separately or every release
+        // of a will with an unclaimed hashed beneficiary would abort with
+        // `DistributionMismatch` (#57).
+        let mut hashed_reserve: i128 = 0;
         if hashed_bps > 0 {
-            let hashed_reserve = proportional_share(available, hashed_bps);
+            hashed_reserve = proportional_share(available, hashed_bps);
             available -= hashed_reserve;
             hashed_reserves.set(token_addr.clone(), hashed_reserve);
         }

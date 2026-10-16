@@ -179,8 +179,8 @@ gets its own [contract spec artifact](./spec) once exported.
 - Grace period is anchored to the missed check-in deadline instead of the time
   `trigger_will` was called; all grace checks share one `grace_deadline`
   helper (#457).
-- Fixed-amount-only wills pay any leftover balance to the final beneficiary
-  instead of stranding it in the contract (#456).
+- Fixed-amount-only wills refund their leftover to the owner instead of
+  stranding it in the contract (#383).
 - `get_wills_by_owner_and_status` filters by status before cutting the page, so
   short pages no longer hide matching wills (#455).
 ### Fixed
