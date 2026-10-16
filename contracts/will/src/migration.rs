@@ -28,7 +28,94 @@ use crate::types::Will;
 ///
 /// Bump this whenever the persisted `Will` layout changes, and add both a
 /// legacy decode arm in [`decode_will`] and a migration step in [`upgrade`].
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+///
+/// Keep in sync with [`crate::storage::CURRENT_SCHEMA_VERSION`]; the two are
+/// asserted equal at compile time in `migrate_will_test.rs`.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+
+/// Legacy `Will` layouts, frozen at the version their successor replaced.
+///
+/// A legacy struct is the **only** way an entry written by an older contract
+/// version can still be decoded: `Will::try_from_val` fails outright when the
+/// stored XDR map is missing a field the current layout declares. Each type
+/// therefore copies its era's `Will` verbatim — field names and order
+/// included — and converts into the current shape with safe defaults for
+/// whatever the newer version added.
+pub mod legacy {
+    use soroban_sdk::{contracttype, Address, Map, Vec};
+
+    use crate::types::{Beneficiary, Guardian, HashedBeneficiary, Will, WillStatus};
+
+    /// The `Will` layout as of schema version 1 — the layout `schema_version`
+    /// itself shipped in (#446), with `keeper_bounty_bps` and `delegate`
+    /// already present.
+    ///
+    /// Superseded by v2, which added `Will::keeper_bounty_token` (#109).
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct WillV1 {
+        pub id: u64,
+        pub owner: Address,
+        pub balances: Map<Address, i128>,
+        pub token: Address,
+        pub is_native: bool,
+        pub balance: i128,
+        pub beneficiaries: Vec<Beneficiary>,
+        pub hashed_beneficiaries: Vec<HashedBeneficiary>,
+        pub checkin_period_days: u64,
+        pub grace_period_days: u64,
+        pub last_checkin: u64,
+        pub trigger_time: Option<u64>,
+        pub confirmation_deadline: Option<u64>,
+        pub status: WillStatus,
+        pub guardians: Vec<Guardian>,
+        pub guardian_vote_weight: u32,
+        pub guardian_votes: u32,
+        pub guardian_cancel_vote_weight: u32,
+        pub guardian_cancel_votes: u32,
+        pub guardian_threshold: u32,
+        pub guardian_list_updated_at: u64,
+        pub schema_version: u32,
+        pub keeper_bounty_bps: u32,
+        pub delegate: Option<Address>,
+    }
+
+    impl WillV1 {
+        /// Lifts a v1 entry into the current `Will` shape. The field v2 added
+        /// defaults to `None` — the proportional keeper-bounty split (#109) —
+        /// and `schema_version` stays at 1 so [`super::upgrade`] still runs
+        /// the v1 → v2 step.
+        pub fn into_current(self) -> Will {
+            Will {
+                id: self.id,
+                owner: self.owner,
+                balances: self.balances,
+                token: self.token,
+                is_native: self.is_native,
+                balance: self.balance,
+                beneficiaries: self.beneficiaries,
+                hashed_beneficiaries: self.hashed_beneficiaries,
+                checkin_period_days: self.checkin_period_days,
+                grace_period_days: self.grace_period_days,
+                last_checkin: self.last_checkin,
+                trigger_time: self.trigger_time,
+                confirmation_deadline: self.confirmation_deadline,
+                status: self.status,
+                guardians: self.guardians,
+                guardian_vote_weight: self.guardian_vote_weight,
+                guardian_votes: self.guardian_votes,
+                guardian_cancel_vote_weight: self.guardian_cancel_vote_weight,
+                guardian_cancel_votes: self.guardian_cancel_votes,
+                guardian_threshold: self.guardian_threshold,
+                guardian_list_updated_at: self.guardian_list_updated_at,
+                schema_version: self.schema_version,
+                keeper_bounty_bps: self.keeper_bounty_bps,
+                keeper_bounty_token: None,
+                delegate: self.delegate,
+            }
+        }
+    }
+}
 
 /// Decodes a raw persisted will, accepting the current layout and every known
 /// legacy layout.
@@ -43,11 +130,10 @@ pub fn decode_will(env: &Env, raw: &Val) -> Result<Will, WillError> {
         return Ok(will);
     }
 
-    // Legacy layouts are tried here, newest first, once a v2 exists, e.g.:
-    //
-    //     if let Ok(old) = legacy::WillV1::try_from_val(env, raw) {
-    //         return Ok(old.into_current(env));
-    //     }
+    // Legacy layouts are tried here, newest first.
+    if let Ok(old) = legacy::WillV1::try_from_val(env, raw) {
+        return Ok(old.into_current());
+    }
 
     Err(WillError::UnsupportedSchemaVersion)
 }
@@ -59,6 +145,7 @@ pub fn upgrade(env: &Env, mut will: Will) -> Will {
     while will.schema_version < CURRENT_SCHEMA_VERSION {
         will = match will.schema_version {
             0 => migrate_v0_to_v1(env, will),
+            1 => migrate_v1_to_v2(env, will),
             // Every version below CURRENT_SCHEMA_VERSION must have a step.
             _ => soroban_sdk::panic_with_error!(env, WillError::UnsupportedSchemaVersion),
         };
@@ -70,5 +157,14 @@ pub fn upgrade(env: &Env, mut will: Will) -> Will {
 /// layout is otherwise identical, so only the version number changes.
 fn migrate_v0_to_v1(_env: &Env, mut will: Will) -> Will {
     will.schema_version = 1;
+    will
+}
+
+/// v1 → v2: v2 added `Will::keeper_bounty_token` (#109). `decode_will` has
+/// already lifted the entry into the current shape with the new field
+/// defaulted to `None` (proportional bounty split), so the step only stamps
+/// the new version.
+fn migrate_v1_to_v2(_env: &Env, mut will: Will) -> Will {
+    will.schema_version = 2;
     will
 }

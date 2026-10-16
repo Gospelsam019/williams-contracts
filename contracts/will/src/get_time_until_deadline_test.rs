@@ -133,8 +133,8 @@ fn test_get_time_until_deadline_triggered_will_counts_grace_period() {
         grace_period_days,
     );
 
-    // Advance past check-in deadline
-    env.ledger().with_mut(|l| l.timestamp += 31 * DAY);
+    // Advance to check-in deadline
+    env.ledger().with_mut(|l| l.timestamp += 30 * DAY);
 
     // Trigger the will
     client.trigger_will(&will_id);
@@ -168,8 +168,8 @@ fn test_get_time_until_deadline_triggered_will_negative_after_grace_expires() {
         grace_period_days,
     );
 
-    // Advance past check-in deadline
-    env.ledger().with_mut(|l| l.timestamp += 31 * DAY);
+    // Advance to check-in deadline
+    env.ledger().with_mut(|l| l.timestamp += 30 * DAY);
 
     // Trigger the will
     client.trigger_will(&will_id);

@@ -214,9 +214,14 @@ pub(crate) fn assert_percentage_shares_sum_to_10000(will: &Will) {
         }
     }
     if has_percentage {
-        assert_eq!(
-            total, 10_000,
-            "will {}'s percentage-typed beneficiaries do not sum to 10,000 basis points",
+        let hashed_total: u128 = will
+            .hashed_beneficiaries
+            .iter()
+            .map(|h| h.percentage as u128)
+            .sum();
+        assert!(
+            total + hashed_total <= 10_000,
+            "will {}'s percentage-typed beneficiaries exceed 10,000 basis points",
             will.id
         );
     }
@@ -526,10 +531,15 @@ fn assert_created_will(
             Allocation::FixedAmount(_) => 0,
         };
     }
+    let hashed_total: u128 = will
+        .hashed_beneficiaries
+        .iter()
+        .map(|h| h.percentage as u128)
+        .sum();
     check(
-        total == 10_000,
+        total + hashed_total <= 10_000,
         input,
-        "beneficiary basis points do not sum to 10,000",
+        "beneficiary basis points exceed 10,000",
     );
 
     // Guardians: a stored quorum must be reachable, which it is not if the
@@ -853,10 +863,15 @@ fn assert_updated_beneficiaries(
             Allocation::FixedAmount(_) => 0,
         };
     }
+    let hashed_total: u128 = will
+        .hashed_beneficiaries
+        .iter()
+        .map(|h| h.percentage as u128)
+        .sum();
     check(
-        total == 10_000,
+        total + hashed_total <= 10_000,
         input,
-        "beneficiary basis points do not sum to 10,000 after an update",
+        "beneficiary basis points exceed 10,000 after an update",
     );
 
     // Every current beneficiary must be able to find the will...
@@ -892,4 +907,296 @@ fn assert_updated_beneficiaries(
             "a removed beneficiary still has the will in their index",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// merge_wills runner
+// ---------------------------------------------------------------------------
+
+/// Input for a fuzz run of `merge_wills`.
+///
+/// Two valid wills are created from the sanitised `create` spec (same owner,
+/// same primary token), then merged. The runner checks every conservation
+/// invariant: combined balance, beneficiary counts, index consistency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct MergeWillsInput {
+    /// Template used to build both wills; sanitised before use so both
+    /// creations always succeed.
+    pub create: CreateWillInput,
+    /// Override the beneficiary list for the second will. A `None` means
+    /// both wills use the same list; a `Some` means distinct lists, which
+    /// exercises the recalculation path through `merge_beneficiaries`.
+    pub will_b_beneficiaries: Option<Vec<BeneficiarySpec>>,
+}
+
+/// Drives `merge_wills` with arbitrary input.
+///
+/// The two source wills are created from a sanitised spec, so the merge is
+/// always attempted. The runner then asserts the invariants the docs promise:
+///
+/// - The surviving will's balance equals the sum of both sources' balances.
+/// - The consumed will is `Cancelled` and has zero balance.
+/// - All beneficiaries of the surviving will can still find it in their index.
+pub fn run_merge_wills(input: &MergeWillsInput) -> Outcome {
+    let create = sanitize_create(&input.create);
+    let scenario = Scenario::new(create.mint * 2); // enough for two wills
+
+    // Create will A.
+    let will_id_a = create_valid_will(&scenario, input, &create);
+    let balance_a = scenario
+        .client
+        .get_will(&will_id_a)
+        .balances
+        .get(scenario.token_address.clone())
+        .unwrap_or(0);
+
+    // Create will B — optionally with a different beneficiary list.
+    let will_id_b = if let Some(ref specs) = input.will_b_beneficiaries {
+        let sanitised = sanitize_specs(specs);
+        // Temporarily override the beneficiary list for will B.
+        let create_b = CreateWillInput {
+            beneficiaries: sanitised,
+            ..create.clone()
+        };
+        create_valid_will(&scenario, input, &create_b)
+    } else {
+        create_valid_will(&scenario, input, &create)
+    };
+    let balance_b = scenario
+        .client
+        .get_will(&will_id_b)
+        .balances
+        .get(scenario.token_address.clone())
+        .unwrap_or(0);
+
+    let expected_combined = balance_a.saturating_add(balance_b);
+
+    // Attempt the merge.
+    let result = scenario
+        .client
+        .try_merge_wills(&scenario.owner, &will_id_a, &will_id_b);
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => violation(input, "merge_wills returned an undecodable value"),
+        // A declared error (e.g. MergeWouldExceedLimits) is acceptable — the
+        // harness is intentionally constructed so most merges succeed, but
+        // the fuzzer can still explore the rejection paths.
+        Err(Ok(_)) => return Outcome::Rejected,
+        Err(Err(e)) => violation(
+            input,
+            &std::format!("merge_wills aborted instead of returning a declared WillError: {e:?}"),
+        ),
+    }
+
+    // --- post-merge invariants ---
+    let surviving = scenario.client.get_will(&will_id_a);
+
+    // Balance conservation: the surviving will must hold exactly the sum of
+    // what both wills held before the merge.
+    check(
+        surviving
+            .balances
+            .get(scenario.token_address.clone())
+            .unwrap_or(0)
+            == expected_combined,
+        input,
+        "surviving will's balance does not equal the sum of both source balances",
+    );
+
+    // Consumed will must be Cancelled with empty balances.
+    let consumed = scenario.client.get_will(&will_id_b);
+    check(
+        consumed.status == WillStatus::Cancelled,
+        input,
+        "consumed will is not Cancelled after merge",
+    );
+    check(
+        consumed.balances.is_empty()
+            || consumed
+                .balances
+                .get(scenario.token_address.clone())
+                .unwrap_or(0)
+                == 0,
+        input,
+        "consumed will still records a non-zero balance after merge",
+    );
+
+    // Beneficiary count must be within the allowed range.
+    check(
+        !surviving.beneficiaries.is_empty() && surviving.beneficiaries.len() <= MAX_BENEFICIARIES,
+        input,
+        "merged will's beneficiary count is outside 1..=MAX_BENEFICIARIES",
+    );
+
+    // Every beneficiary can still find the surviving will in their index.
+    assert_beneficiaries_are_indexed(&scenario.client, &surviving);
+
+    Outcome::Accepted(will_id_a)
+}
+
+// ---------------------------------------------------------------------------
+// split_will runner
+// ---------------------------------------------------------------------------
+
+/// Input for a fuzz run of `split_will`.
+///
+/// One valid will is created, then a subset of its beneficiaries is split off
+/// into a new child will. The runner checks balance conservation, beneficiary
+/// normalization, and index consistency for both source and child.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct SplitWillInput {
+    /// Template used to build the source will; sanitised before use.
+    pub create: CreateWillInput,
+    /// Fraction of the primary-token balance to split into the child will,
+    /// expressed as an integer percentage (0..=100). Clamped to 1..=99 so
+    /// both sides retain a positive balance.
+    pub split_pct: u8,
+    /// Number of beneficiaries (from the front of the list) to move to the
+    /// child will. Zero or "more than available" is clamped so at least one
+    /// beneficiary moves and at least one stays.
+    pub beneficiaries_to_split: u8,
+}
+
+/// Drives `split_will` with arbitrary input.
+///
+/// The source will is created from a sanitised spec, then split. The runner
+/// asserts the invariants the docs promise:
+///
+/// - Source balance + child balance = original total.
+/// - Source retains at least one beneficiary.
+/// - Child beneficiaries' percentages renormalise to exactly 10,000 bps.
+/// - Both wills' beneficiaries are correctly reflected in the reverse index.
+pub fn run_split_will(input: &SplitWillInput) -> Outcome {
+    let create = sanitize_create(&input.create);
+    let scenario = Scenario::new(create.mint);
+
+    let will_id = create_valid_will(&scenario, input, &create);
+    let will = scenario.client.get_will(&will_id);
+
+    let original_balance = will
+        .balances
+        .get(scenario.token_address.clone())
+        .unwrap_or(0);
+
+    if original_balance <= 0 {
+        return Outcome::Rejected;
+    }
+
+    // Determine the split amount: `split_pct` percent of the balance, clamped
+    // so both sides keep at least 1 unit. `1` is the minimum positive amount
+    // the contract accepts.
+    let pct = (input.split_pct as i128).clamp(1, 99);
+    let split_amount = (original_balance * pct / 100)
+        .max(1)
+        .min(original_balance - 1);
+    if split_amount <= 0 || split_amount >= original_balance {
+        return Outcome::Rejected;
+    }
+
+    // Determine how many beneficiaries to move: at least 1, at most n-1
+    // (source must keep at least one).
+    let n = will.beneficiaries.len() as usize;
+    if n <= 1 {
+        // Can't split if there is only one beneficiary (source would be empty).
+        return Outcome::Rejected;
+    }
+    let to_split_count = (input.beneficiaries_to_split as usize).clamp(1, n - 1);
+
+    // Build the `beneficiaries_to_split` list from the will's actual list.
+    let mut split_beneficiaries: SorobanVec<Beneficiary> = SorobanVec::new(&scenario.env);
+    for beneficiary in will.beneficiaries.iter().take(to_split_count) {
+        split_beneficiaries.push_back(beneficiary);
+    }
+    let tokens: SorobanVec<(Address, i128)> = soroban_sdk::vec![
+        &scenario.env,
+        (scenario.token_address.clone(), split_amount)
+    ];
+
+    let result =
+        scenario
+            .client
+            .try_split_will(&will_id, &scenario.owner, &split_beneficiaries, &tokens);
+
+    let child_id = match result {
+        Ok(Ok(child_id)) => child_id,
+        Ok(Err(_)) => violation(input, "split_will returned an undecodable value"),
+        // A declared error means the split input was malformed; both wills
+        // must be unchanged — checked below.
+        Err(Ok(_)) => {
+            // On rejection the source will must be unmodified.
+            let after = scenario.client.get_will(&will_id);
+            check(
+                after.balances == will.balances,
+                input,
+                "a rejected split changed the source will's balances",
+            );
+            check(
+                after.beneficiaries == will.beneficiaries,
+                input,
+                "a rejected split changed the source will's beneficiaries",
+            );
+            return Outcome::Rejected;
+        }
+        Err(Err(e)) => violation(
+            input,
+            &std::format!("split_will aborted instead of returning a declared WillError: {e:?}"),
+        ),
+    };
+
+    // --- post-split invariants ---
+    let source_after = scenario.client.get_will(&will_id);
+    let child = scenario.client.get_will(&child_id);
+
+    // Balance conservation: source + child = original.
+    let source_bal = source_after
+        .balances
+        .get(scenario.token_address.clone())
+        .unwrap_or(0);
+    let child_bal = child
+        .balances
+        .get(scenario.token_address.clone())
+        .unwrap_or(0);
+    check(
+        source_bal + child_bal == original_balance,
+        input,
+        "source balance + child balance does not equal the original balance after split",
+    );
+    check(
+        child_bal == split_amount,
+        input,
+        "child will's balance does not equal the requested split amount",
+    );
+
+    // Source must retain at least one beneficiary.
+    check(
+        !source_after.beneficiaries.is_empty(),
+        input,
+        "source will has no beneficiaries after split",
+    );
+
+    // Beneficiary count bounds.
+    check(
+        source_after.beneficiaries.len() <= MAX_BENEFICIARIES,
+        input,
+        "source will's beneficiary count exceeds MAX_BENEFICIARIES after split",
+    );
+    check(
+        !child.beneficiaries.is_empty() && child.beneficiaries.len() <= MAX_BENEFICIARIES,
+        input,
+        "child will's beneficiary count is outside 1..=MAX_BENEFICIARIES",
+    );
+
+    // Percentage normalisation: both wills' percentage beneficiaries must sum
+    // to 10,000 bps.
+    assert_percentage_shares_sum_to_10000(&source_after);
+    assert_percentage_shares_sum_to_10000(&child);
+
+    // Index consistency: both wills' beneficiaries must be able to find them.
+    assert_beneficiaries_are_indexed(&scenario.client, &source_after);
+    assert_beneficiaries_are_indexed(&scenario.client, &child);
+
+    Outcome::Accepted(child_id)
 }

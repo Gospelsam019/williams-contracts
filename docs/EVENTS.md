@@ -18,7 +18,8 @@ data, in order.
 | `triggered` | `trigger_will` | `grace_period_ends: u64` |
 | `emerg` | `emergency_checkin` | `(owner: Address, next_deadline: u64)` |
 | `released` | `release_inheritance`, `guardian_trigger` (on quorum) | `(token_count: u32, beneficiaries_count: u32)` |
-| `bounty` | `release_inheritance`, `guardian_trigger` (keeper bounty paid) | `(keeper: Address, amount: i128)` |
+| `bounty` | `release_inheritance`, `guardian_trigger` (keeper bounty paid) | `(keeper: Address, amount: i128)` — published once per token the bounty was paid from; with the default proportional selection (#109) that is one event per held token whose share rounds above zero. |
+| `bountytok` | `set_keeper_bounty_token` | `token: Option<Address>` — `Some(t)` targets the whole bounty at `t`, `None` restores the default proportional split (#109). |
 | `cancelled` | `cancel_will` | `(owner: Address, token_count: u32)` |
 | `closed` | `close_will` | `owner: Address` |
 | `archived` | `archive_will` | `(owner: Address, timestamp: u64, reason: Symbol)` |
@@ -42,15 +43,15 @@ data, in order.
 
 ## `archived`
 
-`archive_will` moves a `Released` or `Cancelled` will out of active storage
+`archive_will` moves a `Released`, `Cancelled` or `Settled` will out of active storage
 and out of the owner and beneficiary indexes. After this event, `get_will`
 returns `WillNotFound` and the will no longer shows up in `get_wills_by_owner`,
 `get_wills_by_owner_and_status` or `get_wills_by_beneficiary`.
 
 - `owner`: the will's owner.
 - `timestamp`: ledger timestamp (Unix seconds) when the will was archived.
-- `reason`: the terminal status the will was archived from, either
-  `released` or `cancelled`.
+- `reason`: the terminal status the will was archived from, one of
+  `released`, `cancelled` or `settled`.
 
 Indexers should treat this as the will's final lifecycle event.
 

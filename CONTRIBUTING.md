@@ -104,7 +104,8 @@ decoding unless you also ship a migration path. The machinery is in
 | Version | Change |
 |---|---|
 | 0 | Wills written before `schema_version` was populated. |
-| 1 | Current layout. |
+| 1 | Layout with `keeper_bounty_bps` and `delegate`; no bounty-token selection. |
+| 2 | Current layout. Added `Will::keeper_bounty_token` (#109). |
 
 **To introduce version N+1** (for example, adding a field to `Will`):
 

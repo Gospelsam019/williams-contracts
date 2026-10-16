@@ -175,6 +175,13 @@ pub struct TokenLockedBalance {
 /// every storage write it made, so a failed operation cannot be counted
 /// on-chain. Failure rates must be measured off-chain from transaction
 /// results.
+///
+/// # Discrete bounded storage architecture (Issue #22)
+///
+/// On-chain locked totals are stored in individual storage entries under
+/// `DataKey::TotalLocked(Address)`, decoupling per-token balance updates from
+/// vector-scanning overhead. `total_locked_by_token` is assembled at query
+/// time for backward-compatible off-chain reporting.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolStats {
@@ -376,6 +383,24 @@ pub struct Will {
     /// When set, a portion of the inheritance is paid to callers who trigger
     /// or release the will (not to the owner). Defaults to 0.
     pub keeper_bounty_bps: u32,
+    /// Which token the keeper bounty is paid from (#109).
+    ///
+    /// `None` — the default, and what every creation path stores — deducts
+    /// the bounty proportionally from **every** token the will holds: each
+    /// token contributes `floor(balance * keeper_bounty_bps / 10_000)` of
+    /// itself. A keeper's incentive therefore scales with the estate's whole
+    /// value instead of an arbitrarily chosen first token: an estate holding
+    /// 1 XLM and 100,000 USDC pays 1% of each, not 1% of the XLM alone.
+    ///
+    /// `Some(token)` concentrates the whole bounty on that one token, so the
+    /// owner can target the asset keepers actually want (typically the native
+    /// asset, so the bounty covers the keeper's gas). The token must be one
+    /// the will holds; if its bounty share rounds to zero, `distribute`
+    /// falls back to the proportional split so a dust-sized target can never
+    /// leave the keeper unpaid while the will holds value elsewhere.
+    ///
+    /// Set through [`crate::WillContract::set_keeper_bounty_token`].
+    pub keeper_bounty_token: Option<Address>,
     /// Optional delegate address that may call `check_in` on the owner's
     /// behalf. `None` means only the owner can check in.
     pub delegate: Option<Address>,
@@ -398,6 +423,29 @@ pub struct WillPage {
 }
 
 /// Reasons a guardian can provide when casting a trigger vote.
+///
+/// # Trustless Consensus Model & Informational Metadata
+///
+/// **Important**: `GuardianVoteReason` is purely **informational metadata**.
+/// There is **no on-chain consensus requirement** or agreement check among
+/// voting guardians. Two or more guardians can cast trigger votes with conflicting
+/// reasons (e.g. Guardian A votes `Deceased` while Guardian B votes `Incapacitated`
+/// or `Other`), and quorum is reached immediately once the accumulated vote weight
+/// satisfies the threshold without requiring agreement on the reason.
+///
+/// The contract enforces threshold-based authorization, not semantic consensus
+/// over the real-world condition of the owner.
+///
+/// ## Off-Chain Auditing Patterns
+///
+/// Because on-chain consensus on reasons is deliberately not enforced, off-chain
+/// indexers, legal executors, and auditing systems should:
+/// 1. Query all cast guardian votes and reasons via [`crate::WillContract::get_guardian_votes`]
+///    or individual votes via [`crate::WillContract::get_guardian_vote_status`].
+/// 2. Audit the reason metadata for conflicting claims across guardians.
+/// 3. Flag any discrepancies (e.g. conflicting `Deceased` vs `Unreachable` votes)
+///    for manual inspection or off-chain legal verification before taking irrevocable
+///    real-world legal actions.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuardianVoteReason {

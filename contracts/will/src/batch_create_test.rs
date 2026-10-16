@@ -97,11 +97,11 @@ fn batch_is_rejected_entirely_when_one_spec_is_invalid() {
     let (env, contract_id, owner, token) = setup();
     let client = WillContractClient::new(&env, &contract_id);
 
-    // The middle spec's percentages do not sum to 10,000 bps.
+    // The middle spec's percentages exceed 10,000 bps.
     let specs = vec![
         &env,
         spec(&env, &token, 100_000, 10_000),
-        spec(&env, &token, 200_000, 9_000),
+        spec(&env, &token, 200_000, 10_001),
         spec(&env, &token, 300_000, 10_000),
     ];
 
@@ -176,11 +176,11 @@ fn batch_create_wills_atomicity_rolls_back_token_transfers() {
 
     let initial_balance = token_client.balance(&owner);
 
-    // Spec 1 is valid (locks 100_000). Spec 2 is invalid (percentage = 9_000 != 10_000).
+    // Spec 1 is valid (locks 100_000). Spec 2 is invalid (percentage = 10_001 > 10_000).
     let specs = vec![
         &env,
         spec(&env, &token, 100_000, 10_000),
-        spec(&env, &token, 200_000, 9_000),
+        spec(&env, &token, 200_000, 10_001),
     ];
 
     let res = client.try_batch_create_wills(&owner, &specs);

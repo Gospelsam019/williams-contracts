@@ -21,7 +21,7 @@
 //! outside the contract), its contribution would remain in the counter forever
 //! with no repair path.  The `archive_will` entry point, which is the only
 //! supported way to remove a will from storage, requires the will to be
-//! `Released` or `Cancelled` first — i.e. after the counter has already been
+//! `Released`, `Cancelled` or `Settled` first — i.e. after the counter has already been
 //! decremented.  The counter therefore cannot be inflated by `archive_will`.
 //!
 //! There is currently no on-chain repair endpoint.  Clients that need to audit

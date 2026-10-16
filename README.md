@@ -27,6 +27,14 @@ Williams is a trustless, on-chain inheritance protocol for Stellar Soroban. It l
 7. **Update beneficiaries.** While active, the owner can call `update_beneficiaries` to change who inherits and in what proportions.
 8. **Guardian override.** A will can name up to 3 guardians. Once the will's guardian threshold is reached (2 by default, configurable per will), their `guardian_trigger` calls force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive. See [docs/adr/0001-guardian-threshold.md](./docs/adr/0001-guardian-threshold.md) for the rationale behind the 2-of-3 default, its known limitations, and how it relates to the proposed configurable M-of-N guardian feature.
 
+### Supported Tokens & Fee-on-Transfer Warning
+
+Williams requires standard **SEP-41 compliant tokens** without transfer fees (`balance_transferred == amount`).
+
+> [!WARNING]
+> **Fee-on-transfer, deflationary, and rebasing tokens are strictly unsupported.**
+> The contract assumes that a transfer of `amount` increases its balance by exactly `amount`. If a token charges a transfer tax or burns tokens on transfer, the contract receives less than the amount tracked in its internal balances. At release or cancellation time, payout transactions will fail due to balance shortfalls (e.g. `DistributionMismatch` or contract insolvency), trapping funds. Do not deposit non-standard or fee-bearing tokens.
+
 ## Tech Stack
 
 - **Rust** 1.84+
@@ -173,7 +181,7 @@ If you need more than 10 heirs, you can:
 
 - **One payout per will.** A will is distributed at most once: `release_inheritance`, `guardian_trigger` and the internal `distribute` all refuse a will that is no longer `Active`/`Triggered`. `reveal_and_claim` deducts the hashed beneficiary's share from the will's token balance, so a later release cannot pay it again.
 - **Guardian votes are deduplicated.** Vote weight and count are recomputed from per-guardian records on every vote, so each guardian counts at most once and expired votes drop out; re-voting after expiry refreshes the vote instead of adding to it. The same applies to `guardian_cancel_trigger`.
-- **Keeper bounty comes out of the will.** The bounty is deducted from the first token's balance before the beneficiary split rather than paid on top of it.
+- **Keeper bounty comes out of the will.** The bounty is deducted from the estate before the beneficiary split rather than paid on top of it. By default it is deducted **proportionally from every token the will holds** — each token contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself — so a keeper's incentive scales with the estate's whole value instead of whichever token was locked first (#109). The owner can instead concentrate the whole bounty on one token (e.g. the native asset, to cover the keeper's gas) with `set_keeper_bounty_token`.
 - **Balances are conserved.** For every token, bounty plus beneficiary shares must equal the balance exactly, or the release aborts with `DistributionMismatch`. Percentage rounding dust goes to the last percentage beneficiary; for fixed-amount-only wills any leftover (e.g. from `top_up`) goes to the last beneficiary.
 
 `checkin_period_days` and `grace_period_days` passed to `create_will` must each be at least `1` day (and at most `MAX_PERIOD_DAYS`); a value of `0` panics with `WillError::InvalidPeriod`.
@@ -246,7 +254,8 @@ for the full context.
 
 ### What `archive_will` removes
 
-`archive_will` is permissionless: once a will is `Released` or `Cancelled`, any
+`archive_will` is permissionless: once a will is `Released`, `Cancelled` or
+`Settled` (closed via `close_will`), any
 account may call it to reclaim storage. Beyond the will entry and the
 owner/beneficiary/Triggered indexes, it also drops the will's on-chain
 `WillHistory` entry and every `GuardianVote` / `GuardianCancelVote` entry
@@ -287,7 +296,7 @@ disambiguate.
 | 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
 | 12 | `TooManyBeneficiaries` | The beneficiary list was empty or exceeded `MAX_BENEFICIARIES` (10), or the guardian/token list exceeded its cap. See [the FAQ](#faq-why-is-there-a-beneficiary-limit). |
 | 12 | `TooManyBeneficiaries` | A list-length cap was exceeded: a `beneficiaries` list that is empty or longer than `MAX_BENEFICIARIES`, a `guardians` list longer than `MAX_GUARDIANS`, or a `batch_create_wills` spec list that is empty or longer than `BATCH_MAX`. Token-list bounds are **not** reported here — those raise `InvalidTokenCount`. |
-| 13 | `WillNotSettled` | The requested action requires the will to be `Released` or `Cancelled`. |
+| 13 | `WillNotSettled` | The requested action requires the will to be `Released`, `Cancelled` or `Settled`. |
 | 14 | `WillNotBothActive` | Both wills in a merge must be `Active`. |
 | 15 | `SameWillId` | The same will id was supplied for both sides of a merge. |
 | 16 | `MergeWouldExceedLimits` | Merging would exceed the maximum beneficiaries or guardians. |
