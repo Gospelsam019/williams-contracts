@@ -56,9 +56,9 @@ fn triggered_will() -> (Env, Address, Address, Address, Address, u64, u64) {
     );
 
     // Miss the check-in deadline and trigger.
-    env.ledger().set_timestamp(t0 + 91 * DAY);
+    env.ledger().set_timestamp(t0 + 90 * DAY);
     client.trigger_will(&will_id);
-    let grace_deadline = (t0 + 91 * DAY) + 7 * DAY;
+    let grace_deadline = (t0 + 90 * DAY) + 7 * DAY;
 
     (
         env,
@@ -177,9 +177,9 @@ fn guardian_cancel_follows_the_same_boundary() {
     client.accept_guardian_role(&will_id, &g1);
     client.accept_guardian_role(&will_id, &g2);
 
-    env.ledger().set_timestamp(t0 + 91 * DAY);
+    env.ledger().set_timestamp(t0 + 90 * DAY);
     client.trigger_will(&will_id);
-    let grace_deadline = (t0 + 91 * DAY) + 7 * DAY;
+    let grace_deadline = (t0 + 90 * DAY) + 7 * DAY;
     // The 7-day guardian-list cooldown is long past by the deadline second, so
     // the grace boundary is the only thing that decides whether the cancel is
     // accepted.

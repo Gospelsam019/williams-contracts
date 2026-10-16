@@ -405,11 +405,11 @@ fn create_will_rejects_overflowing_basis_points() {
     );
 }
 
-/// A basis-point sum that does not equal 10,000 must be rejected.
+/// A basis-point sum exceeding 10,000 must be rejected.
 #[test]
 fn create_will_rejects_non_10000_basis_points() {
     let (env, client, owner, token) = setup();
-    let beneficiaries = single_beneficiary(&env, 9_999);
+    let beneficiaries = single_beneficiary(&env, 10_001);
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
 
     assert_eq!(

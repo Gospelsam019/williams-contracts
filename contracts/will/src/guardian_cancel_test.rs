@@ -85,7 +85,7 @@ fn setup(checkin_period_days: u64) -> (Env, Address, Address, Address, u64) {
 fn setup_triggered(checkin_period_days: u64) -> (Env, Address, Address, Address, u64) {
     let (env, contract_id, guardian_a, guardian_b, will_id) = setup(checkin_period_days);
     env.ledger()
-        .with_mut(|l| l.timestamp += (checkin_period_days + 1) * DAY);
+        .with_mut(|l| l.timestamp += checkin_period_days * DAY);
     WillContractClient::new(&env, &contract_id).trigger_will(&will_id);
     (env, contract_id, guardian_a, guardian_b, will_id)
 }

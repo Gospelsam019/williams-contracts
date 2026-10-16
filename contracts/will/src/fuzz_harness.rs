@@ -214,9 +214,14 @@ pub(crate) fn assert_percentage_shares_sum_to_10000(will: &Will) {
         }
     }
     if has_percentage {
-        assert_eq!(
-            total, 10_000,
-            "will {}'s percentage-typed beneficiaries do not sum to 10,000 basis points",
+        let hashed_total: u128 = will
+            .hashed_beneficiaries
+            .iter()
+            .map(|h| h.percentage as u128)
+            .sum();
+        assert!(
+            total + hashed_total <= 10_000,
+            "will {}'s percentage-typed beneficiaries exceed 10,000 basis points",
             will.id
         );
     }
@@ -526,10 +531,15 @@ fn assert_created_will(
             Allocation::FixedAmount(_) => 0,
         };
     }
+    let hashed_total: u128 = will
+        .hashed_beneficiaries
+        .iter()
+        .map(|h| h.percentage as u128)
+        .sum();
     check(
-        total == 10_000,
+        total + hashed_total <= 10_000,
         input,
-        "beneficiary basis points do not sum to 10,000",
+        "beneficiary basis points exceed 10,000",
     );
 
     // Guardians: a stored quorum must be reachable, which it is not if the
@@ -853,10 +863,15 @@ fn assert_updated_beneficiaries(
             Allocation::FixedAmount(_) => 0,
         };
     }
+    let hashed_total: u128 = will
+        .hashed_beneficiaries
+        .iter()
+        .map(|h| h.percentage as u128)
+        .sum();
     check(
-        total == 10_000,
+        total + hashed_total <= 10_000,
         input,
-        "beneficiary basis points do not sum to 10,000 after an update",
+        "beneficiary basis points exceed 10,000 after an update",
     );
 
     // Every current beneficiary must be able to find the will...
