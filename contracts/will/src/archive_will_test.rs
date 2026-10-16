@@ -8,11 +8,13 @@
 //! rather than leaving them orphaned in persistent storage.
 
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, Vec,
+    vec, Address, Env,
 };
 
+use crate::event_test_support as ev;
 use crate::storage::DataKey;
 use crate::{Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient};
 
@@ -250,7 +252,7 @@ fn archive_will_removes_history_and_guardian_vote_entries() {
 
     let guardian_a = Address::generate(&env);
     let guardian_b = Address::generate(&env);
-    let guardians: Vec<Address> = vec![&env, guardian_a.clone(), guardian_b.clone()];
+    let guardians: soroban_sdk::Vec<Address> = vec![&env, guardian_a.clone(), guardian_b.clone()];
 
     let will_id = client.create_will(
         &owner,
@@ -280,7 +282,10 @@ fn archive_will_removes_history_and_guardian_vote_entries() {
     client.guardian_trigger(&will_id, &guardian_a, &GuardianVoteReason::Other);
 
     // The will then goes through the normal missed-check-in path to Triggered.
-    advance(&env, 91);
+    // With 8 days already elapsed, advancing 83 days puts the ledger at day 91,
+    // past the 90-day check-in deadline but inside the 7-day grace period that
+    // ends on day 97 (anchored to the missed check-in deadline #457).
+    advance(&env, 83);
     client.trigger_will(&will_id);
 
     // Guardian B casts a cancel vote. Alone, it is short of quorum too, so the
@@ -395,35 +400,32 @@ fn archive_will_emits_archived_event_with_owner_and_timestamp() {
     let archived_at = env.ledger().timestamp();
     client.archive_will(&will_id);
 
-    let events = env.events().all();
-    let mut found = false;
-    for event in events.all() {
-        if event.1.is_empty() {
-            continue;
-        }
-        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
-        if topic0 != Ok(soroban_sdk::symbol_short!("archived")) {
-            continue;
-        }
-        let topic1: Result<u64, _> = event.1.get(1).unwrap().try_into_val(&env);
-        if topic1 != Ok(will_id) {
-            continue;
-        }
-
-        let data: (Address, u64, soroban_sdk::Symbol) = event.2.try_into_val(&env).unwrap();
-        assert_eq!(data.0, owner, "archived event must carry the will's owner");
-        assert_eq!(
-            data.1, archived_at,
-            "archived event must carry the archival timestamp"
-        );
-        assert_eq!(
-            data.2,
-            soroban_sdk::symbol_short!("released"),
-            "archived event must report the terminal status the will was archived from"
-        );
-        found = true;
-        break;
-    }
-
-    assert!(found, "archive_will must publish an 'archived' event (#494)");
+    let event = ev::find_event(&env, symbol_short!("archived"), Some(will_id), "archived");
+    // Payload order matches `events::will_archived`:
+    // (owner, archived_at, previous_status).
+    let data = ev::data_vec(&event).expect("archived data is a tuple");
+    assert_eq!(
+        data.len(),
+        3,
+        "archived data must be (owner, archived_at, previous_status)"
+    );
+    let event_owner = ev::address_from(&data[0], &env).expect("archived owner is an address");
+    assert_eq!(
+        event_owner, owner,
+        "archived event must carry the will's owner"
+    );
+    assert_eq!(
+        ev::u64_from(&data[1]),
+        Some(archived_at),
+        "archived event must carry the archival timestamp"
+    );
+    let previous = match &data[2] {
+        soroban_sdk::xdr::ScVal::Symbol(sym) => ev::symbol_value(&env, sym),
+        _ => None,
+    };
+    assert_eq!(
+        previous,
+        Some(symbol_short!("released")),
+        "archived event must report the terminal status the will was archived from"
+    );
 }

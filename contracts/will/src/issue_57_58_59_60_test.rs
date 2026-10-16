@@ -20,7 +20,9 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, xdr::ToXdr, Address, Bytes, Env,
+    vec,
+    xdr::ToXdr,
+    Address, Bytes, Env,
 };
 
 use crate::{
@@ -368,8 +370,7 @@ fn issue_59_seq_cursor_stable_across_history_truncation() {
 
     // Walk the entire retained trail in pages of 10 using seq-based cursors.
     let mut cursor: Option<u32> = None;
-    let mut walked: soroban_sdk::Vec<WillStatusTransition> =
-        soroban_sdk::Vec::new(&env);
+    let mut walked: soroban_sdk::Vec<WillStatusTransition> = soroban_sdk::Vec::new(&env);
     loop {
         let page = client.get_will_history_page(&will_id, &cursor, &10);
         if page.is_empty() {
@@ -450,7 +451,11 @@ fn issue_59_seq_cursor_does_not_repeat_last_entry() {
 
     // Page 2: entries with seq > last_seq_p1 (strictly after the last seen).
     let p2 = client.get_will_history_page(&will_id, &Some(last_seq_p1), &2);
-    assert_eq!(p2.len(), 1, "second page must contain exactly 1 remaining entry");
+    assert_eq!(
+        p2.len(),
+        1,
+        "second page must contain exactly 1 remaining entry"
+    );
 
     // Seq on p2 must be strictly greater than last_seq_p1.
     assert!(

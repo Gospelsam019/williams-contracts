@@ -257,4 +257,3 @@ pub enum WillError {
     /// parties may move a stalled payout to a recovery address (#19).
     NotAuthorized = 57,
 }
-

@@ -289,7 +289,12 @@ pub fn beneficiary_renounced(
 ) {
     env.events().publish(
         (symbol_short!("renounce"), will_id),
-        (beneficiary.clone(), owner.clone(), beneficiaries.clone(), trigger_time),
+        (
+            beneficiary.clone(),
+            owner.clone(),
+            beneficiaries.clone(),
+            trigger_time,
+        ),
     );
 }
 

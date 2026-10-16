@@ -10,11 +10,12 @@
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, IntoVal,
+    vec, Address, Env,
 };
 
+use crate::event_test_support as ev;
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 
 const DAY: u64 = 86_400;
@@ -60,13 +61,12 @@ fn setup() -> (Env, Address, Address, u64, u64) {
 /// Extracts the `next_deadline` field (4th element) of the `periodu` event that
 /// `update_periods` just emitted.
 fn emitted_next_deadline(env: &Env) -> u64 {
-    let events = env.events().all();
-    let last = events.last().expect("update_periods must emit an event");
-    assert_eq!(last.1, (symbol_short!("periodu"), 1_u64).into_val(env));
+    let event = ev::find_event(env, symbol_short!("periodu"), Some(1), "periodu");
     // Payload order matches `events::periods_updated`:
     // (owner, checkin_period_days, grace_period_days, next_deadline).
-    let (_, _, _, next_deadline): (Address, u64, u64, u64) = last.2.clone().into_val(env);
-    next_deadline
+    let data = ev::data_vec(&event).expect("periodu data is a tuple");
+    assert_eq!(data.len(), 4, "periodu data must have four fields");
+    ev::u64_from(&data[3]).expect("periodu next_deadline is a u64")
 }
 
 #[test]

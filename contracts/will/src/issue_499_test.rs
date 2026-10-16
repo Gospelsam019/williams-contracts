@@ -109,7 +109,15 @@ fn topping_up_a_genuinely_new_token_adds_a_second_entry_without_disturbing_the_f
     client.top_up(&will_id, &owner, &second_token, &20_000);
 
     let will = client.get_will(&will_id);
-    assert_eq!(will.balances.get(token_address), Some(100_000), "original token's balance must be untouched");
-    assert_eq!(will.balances.get(second_token), Some(20_000), "the new token gets its own entry");
+    assert_eq!(
+        will.balances.get(token_address),
+        Some(100_000),
+        "original token's balance must be untouched"
+    );
+    assert_eq!(
+        will.balances.get(second_token),
+        Some(20_000),
+        "the new token gets its own entry"
+    );
     assert_eq!(will.balances.len(), 2);
 }

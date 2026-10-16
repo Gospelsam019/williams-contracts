@@ -37,24 +37,24 @@ Measured with 5 beneficiaries and 2 guardians.
 
 | entry point | instructions | read entries | write entries | read bytes | write bytes | rent ledger-bytes | fee (stroops) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| create_will | 410549 | 3 | 11 | 888 | 2720 | 2239684560 | 14088200 |
-| check_in | 119505 | 2 | 2 | 1268 | 1188 | 0 | 1339630 |
-| get_will | 59019 | 2 | 0 | 1268 | 0 | 0 | 14860 |
-| top_up | 265035 | 3 | 4 | 2184 | 1636 | 0 | 1388170 |
-| trigger_will | 106282 | 1 | 1 | 1268 | 1128 | 12441600 | 119028 |
-| emergency_checkin (no votes cast) | 121547 | 2 | 2 | 1280 | 1188 | 0 | 1339656 |
-| release_inheritance | 824313 | 3 | 7 | 2064 | 2468 | 580608000 | 3467971 |
-| cancel_will | 255576 | 3 | 4 | 2104 | 1560 | 4147200 | 1420633 |
-| update_beneficiaries (shares only) | 155492 | 2 | 2 | 1268 | 1188 | 0 | 1339485 |
-| update_beneficiaries (full replacement) | 501292 | 2 | 12 | 2048 | 2688 | 808704000 | 6081021 |
-| update_guardians (no votes cast) | 122944 | 2 | 2 | 1268 | 1188 | 0 | 1339404 |
-| guardian_trigger (below threshold) | 154493 | 2 | 3 | 1268 | 1336 | 153446400 | 2223292 |
-| guardian_trigger (reaches threshold) | 892299 | 4 | 9 | 2052 | 2680 | 734054400 | 5653138 |
-| update_guardians (clearing a vote) | 140029 | 2 | 4 | 1416 | 1188 | 0 | 1372205 |
-| get_wills_by_owner (1 will) | 70897 | 3 | 0 | 1340 | 0 | 0 | 21266 |
-| get_wills_by_beneficiary (1 will) | 71307 | 3 | 0 | 1344 | 0 | 0 | 21274 |
-| check_in (rent due) | 123028 | 2 | 2 | 1188 | 1108 | 828800000 | 5967529 |
-| cancel_will (rent due) | 266013 | 3 | 4 | 2104 | 1560 | 180147200 | 2422527 |
+| create_will | 883996 | 18 | 14 | 92 | 4336 | 144733774455 | 1398261322 |
+| check_in | 410415 | 8 | 4 | 0 | 2800 | 290304000 | 5016388 |
+| get_will | 100689 | 2 | 0 | 0 | 0 | 0 | 71 |
+| top_up | 500122 | 9 | 5 | 0 | 2608 | 0 | 2219292 |
+| trigger_will | 447462 | 7 | 4 | 0 | 3140 | 427161600 | 4147343 |
+| emergency_checkin (no votes cast) | 474304 | 8 | 5 | 0 | 3472 | 294451200 | 5061070 |
+| release_inheritance | 1879186 | 21 | 18 | 92 | 6368 | 875059200 | 8543033 |
+| cancel_will | 919185 | 16 | 14 | 0 | 4072 | 294451200 | 5099613 |
+| update_beneficiaries (shares only) | 437996 | 4 | 2 | 0 | 2012 | 0 | 2208230 |
+| update_beneficiaries (full replacement) | 987379 | 14 | 12 | 0 | 3512 | 808704000 | 10063232 |
+| update_guardians (no votes cast) | 352370 | 8 | 6 | 0 | 2012 | 0 | 2222390 |
+| guardian_trigger (below threshold) | 432377 | 6 | 3 | 0 | 2220 | 215654400 | 4291863 |
+| guardian_trigger (reaches threshold) | 2189866 | 24 | 19 | 92 | 5400 | 1086566400 | 12783958 |
+| update_guardians (clearing a vote) | 371695 | 8 | 6 | 0 | 2012 | 0 | 2222404 |
+| get_wills_by_owner (1 will) | 120869 | 3 | 0 | 0 | 0 | 0 | 85 |
+| get_wills_by_beneficiary (1 will) | 115533 | 3 | 0 | 0 | 0 | 0 | 81 |
+| check_in (rent due) | 419343 | 8 | 4 | 0 | 2568 | 2184704000 | 23295424 |
+| cancel_will (rent due) | 972845 | 16 | 14 | 0 | 4072 | 1568051200 | 17406470 |
 
 ### Why two rows for some calls
 

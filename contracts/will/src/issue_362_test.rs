@@ -109,7 +109,7 @@ fn setup_mixed_will<'a>() -> (
 /// exactly as it was: the renounced basis points are not folded into it.
 #[test]
 fn renouncing_the_last_percentage_beneficiary_leaves_the_fixed_claim_untouched() {
-    let (env, client, _owner, _token, _token_address, _fixed, percentage, will_id) =
+    let (_env, client, _owner, _token, _token_address, _fixed, percentage, will_id) =
         setup_mixed_will();
 
     client.renounce_beneficiary(&will_id, &percentage);
@@ -128,7 +128,7 @@ fn renouncing_the_last_percentage_beneficiary_leaves_the_fixed_claim_untouched()
 /// distribution will read.
 #[test]
 fn renouncing_the_last_percentage_beneficiary_works_while_triggered() {
-    let (env, client, _owner, _token, _token_address, _fixed, percentage, will_id) =
+    let (_env, client, _owner, _token, _token_address, _fixed, percentage, will_id) =
         setup_mixed_will();
 
     assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
@@ -154,7 +154,7 @@ fn renouncing_the_last_percentage_beneficiary_works_while_triggered() {
 /// once no percentage beneficiary is left to absorb it (#383).
 #[test]
 fn the_renounced_share_is_left_unallocated_in_the_will() {
-    let (env, client, _owner, _token, token_address, fixed, percentage, will_id) =
+    let (_env, client, _owner, _token, token_address, fixed, percentage, will_id) =
         setup_mixed_will();
 
     let balance_before = client

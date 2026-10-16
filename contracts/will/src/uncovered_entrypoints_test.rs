@@ -6,11 +6,12 @@
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, TryIntoVal, Vec as SorobanVec,
+    vec, Address, Env, Vec as SorobanVec,
 };
 
+use crate::event_test_support as ev;
 use crate::{
     Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient, WillError,
 };
@@ -57,15 +58,9 @@ fn setup_with_guardian<'a>() -> (Env, WillContractClient<'a>, Address, u64, Addr
 }
 
 /// Returns the payload of the single event whose topic is `(symbol, will_id)`.
-fn find_payload(env: &Env, symbol: soroban_sdk::Symbol, will_id: u64) -> Option<soroban_sdk::Val> {
-    env.events().all().iter().find_map(|event| {
-        let t0: Result<soroban_sdk::Symbol, _> = event.1.get(0)?.try_into_val(env);
-        let t1: Result<u64, _> = event.1.get(1)?.try_into_val(env);
-        match (t0, t1) {
-            (Ok(s), Ok(id)) if s == symbol && id == will_id => Some(event.2),
-            _ => None,
-        }
-    })
+fn find_payload(env: &Env, symbol: soroban_sdk::Symbol, will_id: u64) -> Option<Address> {
+    let event = ev::find_event(env, symbol, Some(will_id), "guardian consent");
+    ev::data_address(env, &event)
 }
 
 #[test]
@@ -76,10 +71,8 @@ fn accept_guardian_role_publishes_gaccept_with_the_guardian() {
 
     let payload = find_payload(&env, symbol_short!("gaccept"), will_id)
         .expect("accept_guardian_role must publish a gaccept event");
-    let address: Result<Address, _> = payload.try_into_val(&env);
     assert_eq!(
-        address,
-        Ok(guardian),
+        payload, guardian,
         "gaccept payload must be the accepting guardian"
     );
 }
@@ -92,10 +85,8 @@ fn reject_guardian_role_publishes_greject_with_the_guardian() {
 
     let payload = find_payload(&env, symbol_short!("greject"), will_id)
         .expect("reject_guardian_role must publish a greject event");
-    let address: Result<Address, _> = payload.try_into_val(&env);
     assert_eq!(
-        address,
-        Ok(guardian),
+        payload, guardian,
         "greject payload must be the rejecting guardian"
     );
 }

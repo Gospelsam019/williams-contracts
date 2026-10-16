@@ -227,7 +227,10 @@ fn permissionless_refund_of_expired_unconfirmed_will() {
         &confirmation_window,
     );
 
-    assert_eq!(token.balance(&owner), initial_owner_balance - deposit_amount);
+    assert_eq!(
+        token.balance(&owner),
+        initial_owner_balance - deposit_amount
+    );
     assert_eq!(
         client.get_will(&will_id).status,
         WillStatus::PendingConfirmation
@@ -322,4 +325,3 @@ fn refund_unconfirmed_will_fails_on_active_will() {
         Err(Ok(WillError::WillNotConfirmed.into()))
     );
 }
-

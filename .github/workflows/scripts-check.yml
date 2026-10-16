@@ -27,6 +27,7 @@ jobs:
           bash -n scripts/integration_test.sh
           bash -n scripts/export-spec.sh
           bash -n scripts/check_resource_costs.sh
+          bash -n scripts/check-wasm-size.sh
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck

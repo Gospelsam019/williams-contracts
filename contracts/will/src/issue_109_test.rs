@@ -69,9 +69,7 @@ fn events_as_tuples(
         .filter_map(|event| {
             // `ContractEventBody` currently has exactly one variant, so a
             // `V0` body is the only shape the test host publishes today.
-            let soroban_sdk::xdr::ContractEventBody::V0(v0) = &event.body else {
-                return None;
-            };
+            let soroban_sdk::xdr::ContractEventBody::V0(v0) = &event.body;
             let mut topics = soroban_sdk::Vec::new(env);
             for topic in v0.topics.iter() {
                 let val: Result<soroban_sdk::Val, _> = topic.clone().try_into_val(env);

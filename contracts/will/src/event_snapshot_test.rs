@@ -18,10 +18,10 @@ use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, TryIntoVal,
+    vec, Address, Env,
 };
 
-use soroban_sdk::testutils::Events as EventsTraitMethods;
+use crate::event_test_support as ev;
 
 use crate::{
     events,
@@ -42,35 +42,29 @@ fn setup_test_env<'a>() -> (Env, Address, Address, WillContractClient<'a>) {
     (env, owner, contract_id, client)
 }
 
-/// Helper to find a specific event by topic in the event stream
+/// Helper to find a specific event by topic in the event stream.
+///
+/// Returns the full XDR event so callers can decode its payload with the
+/// [`crate::event_test_support`] decoders.
 fn find_event_by_topic(
     env: &Env,
     topic_symbol: soroban_sdk::Symbol,
     will_id: Option<u64>,
-) -> Option<soroban_sdk::Val> {
+) -> Option<soroban_sdk::xdr::ContractEvent> {
     let events = env.events().all();
-    for event in events.all().iter() {
-        if event.1.is_empty() {
-            continue;
-        }
-        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(env);
-        if topic0 != Ok(topic_symbol.clone()) {
-            continue;
-        }
-
-        // If will_id is specified, also check that it matches
-        if let Some(expected_will_id) = will_id {
-            if event.1.len() > 1 {
-                let topic1: Result<u64, _> = event.1.get(1).unwrap().try_into_val(env);
-                if topic1 != Ok(expected_will_id) {
-                    continue;
-                }
+    events
+        .events()
+        .iter()
+        .find(|event| {
+            if ev::topic_symbol(env, event).as_ref() != Some(&topic_symbol) {
+                return false;
             }
-        }
-
-        return Some(event.2);
-    }
-    None
+            match will_id {
+                Some(id) => ev::topic_u64(event, 1) == Some(id),
+                None => true,
+            }
+        })
+        .cloned()
 }
 
 #[test]
@@ -115,17 +109,17 @@ fn test_will_created_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("created"), Some(will_id))
         .expect("will_created event not found");
 
-    let data: (Address, u32, soroban_sdk::Vec<Beneficiary>, u64) =
-        event_data.try_into_val(&env).unwrap();
-
-    // Verify event payload structure and content
-    assert_eq!(data.0, owner, "event owner mismatch");
-    assert_eq!(data.1, 1, "event token_count mismatch"); // 1 token provided
-    assert_eq!(data.2, beneficiaries, "event beneficiaries mismatch");
-    assert_eq!(data.2.len(), 2, "event beneficiaries count mismatch");
+    let data = ev::data_vec(&event_data).expect("created data is a tuple");
+    assert_eq!(data.len(), 4);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(1)); // 1 token provided
+    assert_eq!(
+        ev::beneficiary_list_from(&env, &data[2]),
+        Some(beneficiaries.clone())
+    );
     // data.3 is checkin_deadline, verify it's reasonable
     assert!(
-        data.3 > env.ledger().timestamp(),
+        ev::u64_from(&data[3]).unwrap() > env.ledger().timestamp(),
         "checkin_deadline should be in future"
     );
 }
@@ -147,8 +141,11 @@ fn test_will_confirmed_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("confirmed"), Some(will_id))
         .expect("will_confirmed event not found");
 
-    let data: Address = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data, owner, "event owner mismatch");
+    assert_eq!(
+        ev::data_address(&env, &event_data),
+        Some(owner.clone()),
+        "event owner mismatch"
+    );
 }
 
 #[test]
@@ -167,9 +164,10 @@ fn test_check_in_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("checkin"), Some(will_id))
         .expect("check_in event not found");
 
-    let data: (Address, u64) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "event owner mismatch");
-    assert_eq!(data.1, next_deadline, "event next_deadline mismatch");
+    let data = ev::data_vec(&event_data).expect("event data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u64_from(&data[1]), Some(next_deadline));
 }
 
 #[test]
@@ -187,8 +185,11 @@ fn test_will_triggered_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("triggered"), Some(will_id))
         .expect("will_triggered event not found");
 
-    let data: u64 = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data, grace_period_ends, "event grace_period_ends mismatch");
+    assert_eq!(
+        ev::data_u64(&event_data),
+        Some(grace_period_ends),
+        "event grace_period_ends mismatch"
+    );
 }
 
 #[test]
@@ -206,9 +207,10 @@ fn test_emergency_checkin_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("emerg"), Some(will_id))
         .expect("emergency_checkin event not found");
 
-    let data: (Address, u64) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "event owner mismatch");
-    assert_eq!(data.1, next_deadline, "event next_deadline mismatch");
+    let data = ev::data_vec(&event_data).expect("event data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u64_from(&data[1]), Some(next_deadline));
 }
 
 #[test]
@@ -227,12 +229,10 @@ fn test_inheritance_released_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("released"), Some(will_id))
         .expect("inheritance_released event not found");
 
-    let data: (u32, u32) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, token_count, "event token_count mismatch");
-    assert_eq!(
-        data.1, beneficiaries_count,
-        "event beneficiaries_count mismatch"
-    );
+    let data = ev::data_vec(&event_data).expect("released data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::u32_from(&data[0]), Some(token_count));
+    assert_eq!(ev::u32_from(&data[1]), Some(beneficiaries_count));
 }
 
 #[test]
@@ -250,9 +250,10 @@ fn test_will_cancelled_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("cancelled"), Some(will_id))
         .expect("will_cancelled event not found");
 
-    let data: (Address, u32) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "event owner mismatch");
-    assert_eq!(data.1, token_count, "event token_count mismatch");
+    let data = ev::data_vec(&event_data).expect("cancelled data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(token_count));
 }
 
 #[test]
@@ -277,14 +278,14 @@ fn test_beneficiaries_updated_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("benefup"), Some(will_id))
         .expect("beneficiaries_updated event not found");
 
-    let data: (Address, u32, soroban_sdk::Vec<Beneficiary>) =
-        event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "event owner mismatch");
+    let data = ev::data_vec(&event_data).expect("benefup data is a tuple");
+    assert_eq!(data.len(), 3);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(beneficiary_count));
     assert_eq!(
-        data.1, beneficiary_count,
-        "event beneficiary_count mismatch"
+        ev::beneficiary_list_from(&env, &data[2]),
+        Some(beneficiaries.clone())
     );
-    assert_eq!(data.2, beneficiaries, "event beneficiaries mismatch");
 }
 
 #[test]
@@ -310,9 +311,13 @@ fn test_guardians_updated_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("guardup"), Some(will_id))
         .expect("guardians_updated event not found");
 
-    let data: (Address, soroban_sdk::Vec<Guardian>) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "event owner mismatch");
-    assert_eq!(data.1, guardians, "event guardians mismatch");
+    let data = ev::data_vec(&event_data).expect("guardup data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(
+        ev::guardian_list_from(&env, &data[1]),
+        Some(guardians.clone())
+    );
 }
 
 #[test]
@@ -329,8 +334,11 @@ fn test_will_closed_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("closed"), Some(will_id))
         .expect("will_closed event not found");
 
-    let data: Address = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data, owner, "event owner mismatch");
+    assert_eq!(
+        ev::data_address(&env, &event_data),
+        Some(owner.clone()),
+        "event owner mismatch"
+    );
 }
 
 #[test]
@@ -350,11 +358,12 @@ fn test_top_up_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("topup"), Some(will_id))
         .expect("top_up event not found");
 
-    let data: (Address, Address, i128, i128) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "event owner mismatch");
-    assert_eq!(data.1, token, "event token mismatch");
-    assert_eq!(data.2, amount, "event amount mismatch");
-    assert_eq!(data.3, new_balance, "event new_balance mismatch");
+    let data = ev::data_vec(&event_data).expect("topup data is a tuple");
+    assert_eq!(data.len(), 4);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::address_from(&data[1], &env), Some(token.clone()));
+    assert_eq!(ev::i128_from(&data[2]), Some(amount));
+    assert_eq!(ev::i128_from(&data[3]), Some(new_balance));
 }
 
 #[test]
@@ -374,10 +383,11 @@ fn test_guardian_voted_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("gvote"), Some(will_id))
         .expect("guardian_voted event not found");
 
-    let data: (Address, u32, u32) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, guardian, "event guardian mismatch");
-    assert_eq!(data.1, weight, "event weight mismatch");
-    assert_eq!(data.2, total_weight, "event total_weight mismatch");
+    let data = ev::data_vec(&event_data).expect("vote data is a tuple");
+    assert_eq!(data.len(), 3);
+    assert_eq!(ev::address_from(&data[0], &env), Some(guardian.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(weight));
+    assert_eq!(ev::u32_from(&data[2]), Some(total_weight));
 }
 
 #[test]
@@ -397,10 +407,11 @@ fn test_guardian_cancel_voted_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("gcvote"), Some(will_id))
         .expect("guardian_cancel_voted event not found");
 
-    let data: (Address, u32, u32) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, guardian, "event guardian mismatch");
-    assert_eq!(data.1, weight, "event weight mismatch");
-    assert_eq!(data.2, total_weight, "event total_weight mismatch");
+    let data = ev::data_vec(&event_data).expect("vote data is a tuple");
+    assert_eq!(data.len(), 3);
+    assert_eq!(ev::address_from(&data[0], &env), Some(guardian.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(weight));
+    assert_eq!(ev::u32_from(&data[2]), Some(total_weight));
 }
 
 #[test]
@@ -419,9 +430,10 @@ fn test_guardian_cancelled_trigger_event_snapshot() {
     let event_data = find_event_by_topic(&env, symbol_short!("gcancel"), Some(will_id))
         .expect("guardian_cancelled_trigger event not found");
 
-    let data: (Address, u64) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, guardian, "event guardian mismatch");
-    assert_eq!(data.1, next_deadline, "event next_deadline mismatch");
+    let data = ev::data_vec(&event_data).expect("gcancel data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(guardian.clone()));
+    assert_eq!(ev::u64_from(&data[1]), Some(next_deadline));
 }
 
 #[test]
@@ -455,14 +467,11 @@ fn test_remaining_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("merged"), Some(surviving_will_id))
         .expect("wills_merged event not found");
-    let data: (Address, u64, i128, soroban_sdk::Vec<Beneficiary>) =
-        event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "merged event owner mismatch");
-    assert_eq!(
-        data.1, consumed_will_id,
-        "merged event consumed_will_id mismatch"
-    );
-    assert_eq!(data.2, new_balance, "merged event new_balance mismatch");
+    let data = ev::data_vec(&event_data).expect("merged data is a tuple");
+    assert_eq!(data.len(), 4);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u64_from(&data[1]), Some(consumed_will_id));
+    assert_eq!(ev::i128_from(&data[2]), Some(new_balance));
 
     // will_migrated event
     let will_id = 11111u64;
@@ -475,10 +484,11 @@ fn test_remaining_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("migrated"), Some(will_id))
         .expect("will_migrated event not found");
-    let data: (Address, u32, u32) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "migrated event owner mismatch");
-    assert_eq!(data.1, from_version, "migrated event from_version mismatch");
-    assert_eq!(data.2, to_version, "migrated event to_version mismatch");
+    let data = ev::data_vec(&event_data).expect("migrated data is a tuple");
+    assert_eq!(data.len(), 3);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(from_version));
+    assert_eq!(ev::u32_from(&data[2]), Some(to_version));
 
     // will_cloned event
     let source_id = 22222u64;
@@ -490,9 +500,10 @@ fn test_remaining_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("cloned"), Some(new_id))
         .expect("will_cloned event not found");
-    let data: (u64, Address) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, source_id, "cloned event source_id mismatch");
-    assert_eq!(data.1, owner, "cloned event owner mismatch");
+    let data = ev::data_vec(&event_data).expect("cloned data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::u64_from(&data[0]), Some(source_id));
+    assert_eq!(ev::address_from(&data[1], &env), Some(owner.clone()));
 }
 
 #[test]
@@ -508,16 +519,20 @@ fn test_batch_and_advanced_events_snapshot() {
     // Find batch event (topic is owner, not a standard will_id pattern)
     let events = env.events().all();
     let mut found_batch = false;
-    for event in events.all().iter() {
-        if !event.1.is_empty() {
-            let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
-            if topic0 == Ok(symbol_short!("batch")) {
-                let data: soroban_sdk::Vec<u64> = event.2.try_into_val(&env).unwrap();
-                assert_eq!(data, will_ids, "batch event will_ids mismatch");
-                found_batch = true;
-                break;
-            }
+    for event in events.events().iter() {
+        if ev::topic_symbol(&env, event).as_ref() != Some(&symbol_short!("batch")) {
+            continue;
         }
+        // The topic carries the owner, so confirm the emitter side too.
+        assert_eq!(
+            ev::topic_address(&env, event, 1),
+            Some(owner.clone()),
+            "batch topic must carry the owner"
+        );
+        let batch_ids = ev::u64_list_from(ev::data_vec(event).expect("batch data is a tuple"));
+        assert_eq!(batch_ids, [1u64, 2, 3], "batch event will_ids mismatch");
+        found_batch = true;
+        break;
     }
     assert!(found_batch, "batch_created event not found");
 
@@ -529,8 +544,9 @@ fn test_batch_and_advanced_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("archived"), Some(will_id))
         .expect("will_archived event not found");
-    let data: (Address, u64, soroban_sdk::Symbol) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "archived event owner mismatch");
+    let data = ev::data_vec(&event_data).expect("archived data is a tuple");
+    assert_eq!(data.len(), 3);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
 
     // periods_updated event
     let new_checkin_period_days = 120u64;
@@ -550,20 +566,12 @@ fn test_batch_and_advanced_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("periodu"), Some(will_id))
         .expect("periods_updated event not found");
-    let data: (Address, u64, u64, u64) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "periods_updated event owner mismatch");
-    assert_eq!(
-        data.1, new_checkin_period_days,
-        "periods_updated event checkin_period mismatch"
-    );
-    assert_eq!(
-        data.2, new_grace_period_days,
-        "periods_updated event grace_period mismatch"
-    );
-    assert_eq!(
-        data.3, next_deadline,
-        "periods_updated event next_deadline mismatch"
-    );
+    let data = ev::data_vec(&event_data).expect("periodu data is a tuple");
+    assert_eq!(data.len(), 4);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u64_from(&data[1]), Some(new_checkin_period_days));
+    assert_eq!(ev::u64_from(&data[2]), Some(new_grace_period_days));
+    assert_eq!(ev::u64_from(&data[3]), Some(next_deadline));
 }
 
 #[test]
@@ -593,13 +601,13 @@ fn test_final_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("renounce"), Some(will_id))
         .expect("beneficiary_renounced event not found");
-    let data: (Address, Address, soroban_sdk::Vec<Beneficiary>, Option<u64>) =
-        event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, beneficiary, "renounced event beneficiary mismatch");
-    assert_eq!(data.1, owner, "renounced event owner mismatch");
+    let data = ev::data_vec(&event_data).expect("renounce data is a tuple");
+    assert_eq!(data.len(), 4);
+    assert_eq!(ev::address_from(&data[0], &env), Some(beneficiary.clone()));
+    assert_eq!(ev::address_from(&data[1], &env), Some(owner.clone()));
     assert_eq!(
-        data.3,
-        Some(12345u64),
+        ev::option_u64_from(&data[3]),
+        Some(Some(12345u64)),
         "renounced event trigger_time mismatch"
     );
 
@@ -611,12 +619,12 @@ fn test_final_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("setupd"), Some(will_id))
         .expect("will_settings_updated event not found");
-    let data: (Address, soroban_sdk::Vec<soroban_sdk::Symbol>) =
-        event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, owner, "settings_updated event owner mismatch");
+    let data = ev::data_vec(&event_data).expect("setupd data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
     assert_eq!(
-        data.1, update_fields,
-        "settings_updated event update_fields mismatch"
+        ev::symbol_list_from(&env, &data[1]),
+        Some(update_fields.clone())
     );
 
     // keeper_bounty_paid event
@@ -628,9 +636,10 @@ fn test_final_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("bounty"), Some(will_id))
         .expect("keeper_bounty_paid event not found");
-    let data: (Address, i128) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, keeper, "bounty event keeper mismatch");
-    assert_eq!(data.1, amount, "bounty event amount mismatch");
+    let data = ev::data_vec(&event_data).expect("bounty data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(keeper.clone()));
+    assert_eq!(ev::i128_from(&data[1]), Some(amount));
 
     // will_split event
     let original_id = 66666u64;
@@ -642,10 +651,11 @@ fn test_final_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("split"), Some(original_id))
         .expect("will_split event not found");
-    let data: (u64, Address, i128) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, new_id, "split event new_id mismatch");
-    assert_eq!(data.1, owner, "split event owner mismatch");
-    assert_eq!(data.2, split_amount, "split event split_amount mismatch");
+    let data = ev::data_vec(&event_data).expect("split data is a tuple");
+    assert_eq!(data.len(), 3);
+    assert_eq!(ev::u64_from(&data[0]), Some(new_id));
+    assert_eq!(ev::address_from(&data[1], &env), Some(owner.clone()));
+    assert_eq!(ev::i128_from(&data[2]), Some(split_amount));
 
     // hashed_claimed event
     let claimant = Address::generate(&env);
@@ -656,9 +666,10 @@ fn test_final_events_snapshot() {
 
     let event_data = find_event_by_topic(&env, symbol_short!("hclaim"), Some(will_id))
         .expect("hashed_claimed event not found");
-    let data: (Address, i128) = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data.0, claimant, "hashed_claimed event claimant mismatch");
-    assert_eq!(data.1, claim_amount, "hashed_claimed event amount mismatch");
+    let data = ev::data_vec(&event_data).expect("hclaim data is a tuple");
+    assert_eq!(data.len(), 2);
+    assert_eq!(ev::address_from(&data[0], &env), Some(claimant.clone()));
+    assert_eq!(ev::i128_from(&data[1]), Some(claim_amount));
 }
 
 /// Integration test that verifies event ordering when multiple events are emitted
@@ -708,22 +719,15 @@ fn test_event_ordering_lifecycle() {
 
     // Verify all events are present and in correct order by checking the event stream
     let all_events = env.events().all();
-    let mut event_symbols = Vec::new();
+    let mut event_symbols = std::vec::Vec::new();
 
-    for event in all_events.all().iter() {
-        if !event.1.is_empty() {
-            let symbol: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
-            if let Ok(symbol) = symbol {
-                // Check if this event is for our will_id
-                if event.1.len() > 1 {
-                    let id: Result<u64, _> = event.1.get(1).unwrap().try_into_val(&env);
-                    if let Ok(id) = id {
-                        if id == will_id {
-                            event_symbols.push(symbol);
-                        }
-                    }
-                }
-            }
+    for event in all_events.events().iter() {
+        let Some(symbol) = ev::topic_symbol(&env, event) else {
+            continue;
+        };
+        // Check if this event is for our will_id
+        if ev::topic_u64(event, 1) == Some(will_id) {
+            event_symbols.push(symbol);
         }
     }
 
@@ -800,30 +804,15 @@ fn test_multi_token_event_snapshot_with_mixed_allocations() {
         );
     });
 
+    let will_id = 12345u64;
     // Verify the event was emitted correctly
-    let all_events = env.events().all();
-    let mut found = false;
-
-    for event in all_events.all().iter() {
-        if event.1.is_empty() {
-            continue;
-        }
-        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
-        if topic0 != Ok(symbol_short!("created")) {
-            continue;
-        }
-
-        found = true;
-        let data: (Address, u32, soroban_sdk::Vec<Beneficiary>, u64) =
-            event.2.try_into_val(&env).unwrap();
-        assert_eq!(data.0, owner, "event owner must match creator");
-        assert_eq!(data.1, 2, "event must report two tokens");
-        assert_eq!(data.2, beneficiaries, "event beneficiary list must match");
-        assert_eq!(data.2.len(), 2, "must have two beneficiaries");
-    }
-
-    assert!(
-        found,
-        "will_created event must be emitted for multi-token will"
+    let event = ev::find_event(&env, symbol_short!("created"), Some(will_id), "created");
+    let data = ev::data_vec(&event).expect("created data is a tuple");
+    assert_eq!(data.len(), 4);
+    assert_eq!(ev::address_from(&data[0], &env), Some(owner.clone()));
+    assert_eq!(ev::u32_from(&data[1]), Some(2));
+    assert_eq!(
+        ev::beneficiary_list_from(&env, &data[2]),
+        Some(beneficiaries.clone())
     );
 }

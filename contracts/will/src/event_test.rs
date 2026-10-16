@@ -16,13 +16,25 @@
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    testutils::Events as EventsTrait,
-    vec, Address, Env, TryIntoVal,
+    vec, Address, Env, IntoVal,
 };
 
+use crate::event_test_support as ev;
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient};
+
+/// The ledger timestamp both tests fix the environment to; `create_will`'s
+/// `created` event publishes the first check-in deadline off this clock, so
+/// the expected event is built from the same constant rather than a
+/// hard-coded duplicate.
+const CREATED_AT: u64 = 1_700_000_000;
+
+/// The deadline `create_will` publishes for a `checkin_period_days`-day
+/// period set at [`CREATED_AT`].
+fn expected_deadline(checkin_period_days: u64) -> u64 {
+    CREATED_AT + checkin_period_days * 86_400
+}
 
 #[test]
 fn will_created_event_includes_full_beneficiary_list() {
@@ -65,37 +77,28 @@ fn will_created_event_includes_full_beneficiary_list() {
         &0,
     );
 
-    let events = env.events().all();
-    let mut found = false;
-    for event in events.iter() {
-        if event.1.is_empty() {
-            continue;
-        }
-        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
-        if topic0 != Ok(symbol_short!("created")) {
-            continue;
-        }
-        let topic1: u64 = event.1.get(1).unwrap().try_into_val(&env).unwrap();
-        if topic1 != will_id {
-            continue;
-        }
-
-        found = true;
-        let data: (Address, u32, soroban_sdk::Vec<Beneficiary>, u64) =
-            event.2.try_into_val(&env).unwrap();
-        assert_eq!(data.0, owner, "event owner does not match the creator");
-        assert_eq!(
-            data.1, 1,
-            "event token_count does not match the locked token count"
-        );
-        assert_eq!(
-            data.2, beneficiaries,
-            "event beneficiary list does not match what was supplied to create_will"
-        );
-        assert_eq!(data.2.len(), 2);
-    }
-
-    assert!(found, "will_created event not found");
+    let event = ev::find_event(
+        &env,
+        symbol_short!("created"),
+        Some(will_id),
+        "will_created",
+    );
+    let expected = ev::expected_event(
+        &env,
+        &contract_id,
+        ev::topics(&env, symbol_short!("created"), &[will_id]),
+        (
+            owner.clone(),
+            1u32,
+            beneficiaries.clone(),
+            expected_deadline(90),
+        )
+            .into_val(&env),
+    );
+    assert_eq!(
+        event, expected,
+        "will_created payload must match what create_will was given"
+    );
 }
 
 /// Verify that `will_created` event is correctly emitted when guardians are
@@ -145,32 +148,26 @@ fn will_created_event_with_guardians_included() {
         &0,
     );
 
-    let events = env.events().all();
-    let mut found = false;
-    for event in events.iter() {
-        if event.1.is_empty() {
-            continue;
-        }
-        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
-        if topic0 != Ok(symbol_short!("created")) {
-            continue;
-        }
-        let topic1: u64 = event.1.get(1).unwrap().try_into_val(&env).unwrap();
-        if topic1 != will_id {
-            continue;
-        }
-
-        found = true;
-        let data: (Address, u32, soroban_sdk::Vec<Beneficiary>, u64) =
-            event.2.try_into_val(&env).unwrap();
-        assert_eq!(data.0, owner, "event owner must match creator");
-        assert_eq!(data.1, 1, "event token count must be one");
-        assert_eq!(
-            data.2, beneficiaries,
-            "event beneficiary list must match supplied list"
-        );
-        assert_eq!(data.2.len(), 2, "beneficiary count must be two");
-    }
-
-    assert!(found, "will_created event must be emitted with guardians");
+    let event = ev::find_event(
+        &env,
+        symbol_short!("created"),
+        Some(will_id),
+        "will_created",
+    );
+    let expected = ev::expected_event(
+        &env,
+        &contract_id,
+        ev::topics(&env, symbol_short!("created"), &[will_id]),
+        (
+            owner.clone(),
+            1u32,
+            beneficiaries.clone(),
+            expected_deadline(90),
+        )
+            .into_val(&env),
+    );
+    assert_eq!(
+        event, expected,
+        "will_created must carry the beneficiary list even when guardians are set"
+    );
 }

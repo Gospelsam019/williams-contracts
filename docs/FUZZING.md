@@ -23,6 +23,7 @@ by both the `proptest` suite and a `fuzz/fuzz_targets/` target):
 | `update_beneficiaries` | yes — `run_update_beneficiaries` / `UpdateBeneficiariesInput` |
 | `merge_wills` | yes — `run_merge_wills` / `MergeWillsInput` |
 | `split_will` | yes — `run_split_will` / `SplitWillInput` |
+| `multi_token_distribution` | yes — `run_multi_token_distribution` / `MultiTokenDistributionInput` |
 
 Every other state-mutating entry point has no coverage-guided fuzzing yet and
 is only exercised by hand-written unit tests:

@@ -185,4 +185,3 @@ fn get_guardian_votes_returns_all_cast_votes_and_reasons() {
     let (_, rec_b) = votes_2.get(1).unwrap();
     assert_eq!(rec_b.reason, GuardianVoteReason::Deceased);
 }
-

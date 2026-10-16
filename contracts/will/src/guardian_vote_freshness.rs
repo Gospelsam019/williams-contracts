@@ -17,6 +17,7 @@ use crate::{storage, types::Will};
 
 /// Number of seconds in a day, used to keep the grace period and the ledger
 /// timestamp in the same unit (seconds) when computing vote expiry.
+#[allow(dead_code)]
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Normalises a ledger timestamp to the 1-second granularity that guardian
@@ -58,7 +59,10 @@ mod tests {
         // shift the value, so two votes in the same ledger second stay in the
         // same vote window.
         assert_eq!(to_vote_seconds(1_700_000_000), 1_700_000_000);
-        assert_eq!(to_vote_seconds(1_700_000_000), to_vote_seconds(1_700_000_000));
+        assert_eq!(
+            to_vote_seconds(1_700_000_000),
+            to_vote_seconds(1_700_000_000)
+        );
     }
 
     #[test]

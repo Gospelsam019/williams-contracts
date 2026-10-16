@@ -12,7 +12,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, Vec,
+    vec, Address, Env,
 };
 
 use crate::storage;
@@ -167,7 +167,10 @@ fn audit_detects_drift_and_repair_fixes_it() {
         !audit.consistent,
         "audit must detect the deliberately-introduced drift"
     );
-    assert_eq!(audit.stored.active_will_count, real_computed.active_will_count + 41);
+    assert_eq!(
+        audit.stored.active_will_count,
+        real_computed.active_will_count + 41
+    );
     assert_eq!(
         audit.computed, real_computed,
         "the recomputed side must be unaffected by the corrupted stored value"

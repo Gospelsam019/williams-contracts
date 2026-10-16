@@ -58,3 +58,11 @@ path = "fuzz_targets/split_will.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "multi_token_distribution"
+path = "fuzz_targets/multi_token_distribution.rs"
+test = false
+doc = false
+bench = false
+
