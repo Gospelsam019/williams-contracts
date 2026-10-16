@@ -43,15 +43,15 @@ data, in order.
 
 ## `archived`
 
-`archive_will` moves a `Released` or `Cancelled` will out of active storage
+`archive_will` moves a `Released`, `Cancelled` or `Settled` will out of active storage
 and out of the owner and beneficiary indexes. After this event, `get_will`
 returns `WillNotFound` and the will no longer shows up in `get_wills_by_owner`,
 `get_wills_by_owner_and_status` or `get_wills_by_beneficiary`.
 
 - `owner`: the will's owner.
 - `timestamp`: ledger timestamp (Unix seconds) when the will was archived.
-- `reason`: the terminal status the will was archived from, either
-  `released` or `cancelled`.
+- `reason`: the terminal status the will was archived from, one of
+  `released`, `cancelled` or `settled`.
 
 Indexers should treat this as the will's final lifecycle event.
 

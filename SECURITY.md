@@ -91,6 +91,13 @@ Integrators must build commitments as
 `sha256(beneficiary_address.to_xdr() || salt)` with a random salt of at least
 16 bytes. A commitment built any other way can never be claimed.
 
+### Fee-on-Transfer and Deflationary Tokens (#39)
+
+Williams assumes that all deposited tokens adhere to standard SEP-41 semantics without deduction on transfer (`balance_transferred == amount`).
+
+- **Threat Model**: If a deflationary or fee-on-transfer token is deposited via `create_will` or `top_up`, the actual tokens received by the contract will be strictly less than the nominal `amount` recorded in the will's internal balance. When `distribute()` attempts to pay out beneficiaries or `cancel_will()` refunds the owner, the contract will attempt to transfer more tokens than it holds, causing the transaction to revert and trapping the remaining funds.
+- **Mitigation**: Users and integrators must only deposit standard 1:1 SEP-41 tokens without transfer fees. Tokens with burn-on-transfer, fee-on-transfer, reflection, or rebasing mechanisms are unsupported.
+
 ---
 
 ## Rewards & Stellar Wave Program

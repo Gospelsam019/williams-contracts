@@ -21,13 +21,13 @@ by both the `proptest` suite and a `fuzz/fuzz_targets/` target):
 |---|---|
 | `create_will` | yes — `run_create_will` / `CreateWillInput` |
 | `update_beneficiaries` | yes — `run_update_beneficiaries` / `UpdateBeneficiariesInput` |
+| `merge_wills` | yes — `run_merge_wills` / `MergeWillsInput` |
+| `split_will` | yes — `run_split_will` / `SplitWillInput` |
 
 Every other state-mutating entry point has no coverage-guided fuzzing yet and
 is only exercised by hand-written unit tests:
 
 - `cancel_will`
-- `merge_wills`
-- `split_will`
 - `guardian_trigger`
 - `guardian_cancel_trigger`
 - `accept_guardian_role`
@@ -52,9 +52,8 @@ is only exercised by hand-written unit tests:
 - `update_periods`
 - `update_will_settings`
 
-`merge_wills`, `split_will`, and `cancel_will` are the highest-priority gaps:
-they mutate balances and beneficiary/guardian indexes across two wills (or
-split one into two) in ways a differential/invariant harness — in the style
+`cancel_will` is the highest-priority gap:
+it mutates balances and beneficiary/guardian indexes across wills in ways a differential/invariant harness — in the style
 of the existing `run_create_will`/`run_update_beneficiaries` pair — is well
 suited to catch. See "Adding a target" below for how to wire one up.
 
@@ -127,6 +126,8 @@ cargo install cargo-fuzz
 cd fuzz
 cargo +nightly fuzz run create_will
 cargo +nightly fuzz run update_beneficiaries
+cargo +nightly fuzz run merge_wills
+cargo +nightly fuzz run split_will
 ```
 
 Each target runs until you stop it. Useful flags — everything after `--` goes

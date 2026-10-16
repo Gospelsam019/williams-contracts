@@ -27,6 +27,14 @@ Williams is a trustless, on-chain inheritance protocol for Stellar Soroban. It l
 7. **Update beneficiaries.** While active, the owner can call `update_beneficiaries` to change who inherits and in what proportions.
 8. **Guardian override.** A will can name up to 3 guardians. Once the will's guardian threshold is reached (2 by default, configurable per will), their `guardian_trigger` calls force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive. See [docs/adr/0001-guardian-threshold.md](./docs/adr/0001-guardian-threshold.md) for the rationale behind the 2-of-3 default, its known limitations, and how it relates to the proposed configurable M-of-N guardian feature.
 
+### Supported Tokens & Fee-on-Transfer Warning
+
+Williams requires standard **SEP-41 compliant tokens** without transfer fees (`balance_transferred == amount`).
+
+> [!WARNING]
+> **Fee-on-transfer, deflationary, and rebasing tokens are strictly unsupported.**
+> The contract assumes that a transfer of `amount` increases its balance by exactly `amount`. If a token charges a transfer tax or burns tokens on transfer, the contract receives less than the amount tracked in its internal balances. At release or cancellation time, payout transactions will fail due to balance shortfalls (e.g. `DistributionMismatch` or contract insolvency), trapping funds. Do not deposit non-standard or fee-bearing tokens.
+
 ## Tech Stack
 
 - **Rust** 1.84+
@@ -246,7 +254,8 @@ for the full context.
 
 ### What `archive_will` removes
 
-`archive_will` is permissionless: once a will is `Released` or `Cancelled`, any
+`archive_will` is permissionless: once a will is `Released`, `Cancelled` or
+`Settled` (closed via `close_will`), any
 account may call it to reclaim storage. Beyond the will entry and the
 owner/beneficiary/Triggered indexes, it also drops the will's on-chain
 `WillHistory` entry and every `GuardianVote` / `GuardianCancelVote` entry
@@ -287,7 +296,7 @@ disambiguate.
 | 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
 | 12 | `TooManyBeneficiaries` | The beneficiary list was empty or exceeded `MAX_BENEFICIARIES` (10), or the guardian/token list exceeded its cap. See [the FAQ](#faq-why-is-there-a-beneficiary-limit). |
 | 12 | `TooManyBeneficiaries` | A list-length cap was exceeded: a `beneficiaries` list that is empty or longer than `MAX_BENEFICIARIES`, a `guardians` list longer than `MAX_GUARDIANS`, or a `batch_create_wills` spec list that is empty or longer than `BATCH_MAX`. Token-list bounds are **not** reported here — those raise `InvalidTokenCount`. |
-| 13 | `WillNotSettled` | The requested action requires the will to be `Released` or `Cancelled`. |
+| 13 | `WillNotSettled` | The requested action requires the will to be `Released`, `Cancelled` or `Settled`. |
 | 14 | `WillNotBothActive` | Both wills in a merge must be `Active`. |
 | 15 | `SameWillId` | The same will id was supplied for both sides of a merge. |
 | 16 | `MergeWouldExceedLimits` | Merging would exceed the maximum beneficiaries or guardians. |

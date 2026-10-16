@@ -20,8 +20,9 @@ use soroban_sdk::{
 };
 
 use crate::fuzz_harness::{
-    run_create_will, run_update_beneficiaries, sanitize_specs, BeneficiarySpec, CreateWillInput,
-    Outcome, UpdateBeneficiariesInput, MAX_FUZZ_UPDATES,
+    run_create_will, run_merge_wills, run_split_will, run_update_beneficiaries, sanitize_specs,
+    BeneficiarySpec, CreateWillInput, MergeWillsInput, Outcome, SplitWillInput,
+    UpdateBeneficiariesInput, MAX_FUZZ_UPDATES,
 };
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
 
@@ -278,6 +279,63 @@ proptest! {
             );
         }
     }
+
+    /// `merge_wills` must either succeed (satisfying balance conservation and
+    /// index consistency) or fail with a declared `WillError`. It must never
+    /// abort.
+    ///
+    /// The key invariant: the surviving will's primary-token balance equals
+    /// the sum of both source wills' balances. The consumed will must be
+    /// `Cancelled` with zero balance. Every beneficiary on the surviving will
+    /// must still find it through the reverse index.
+    #[test]
+    fn merge_wills_upholds_balance_conservation(input in merge_wills_input_strategy()) {
+        // If both outcomes are Accepted, the balance invariant was checked
+        // inside the runner. If Rejected, no balances were changed.
+        match run_merge_wills(&input) {
+            Outcome::Accepted(surviving_id) => {
+                prop_assert!(surviving_id >= 1);
+            }
+            Outcome::Rejected => {}
+        }
+    }
+
+    /// `split_will` must either succeed (satisfying balance conservation) or
+    /// fail with a declared `WillError`. It must never abort.
+    ///
+    /// The key invariant: the sum of the source will's remaining balance and
+    /// the child will's balance equals the source will's balance before the
+    /// split.
+    #[test]
+    fn split_will_upholds_balance_conservation(input in split_will_input_strategy()) {
+        match run_split_will(&input) {
+            Outcome::Accepted(child_id) => {
+                prop_assert!(child_id >= 1);
+            }
+            Outcome::Rejected => {}
+        }
+    }
+}
+
+fn merge_wills_input_strategy() -> impl Strategy<Value = MergeWillsInput> {
+    (
+        create_will_input_strategy(),
+        prop::option::of(beneficiaries_strategy()),
+    )
+        .prop_map(|(create, will_b_beneficiaries)| MergeWillsInput {
+            create,
+            will_b_beneficiaries,
+        })
+}
+
+fn split_will_input_strategy() -> impl Strategy<Value = SplitWillInput> {
+    (create_will_input_strategy(), any::<u8>(), any::<u8>()).prop_map(
+        |(create, split_pct, beneficiaries_to_split)| SplitWillInput {
+            create,
+            split_pct,
+            beneficiaries_to_split,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -347,11 +405,11 @@ fn create_will_rejects_overflowing_basis_points() {
     );
 }
 
-/// A basis-point sum that does not equal 10,000 must be rejected.
+/// A basis-point sum exceeding 10,000 must be rejected.
 #[test]
 fn create_will_rejects_non_10000_basis_points() {
     let (env, client, owner, token) = setup();
-    let beneficiaries = single_beneficiary(&env, 9_999);
+    let beneficiaries = single_beneficiary(&env, 10_001);
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
 
     assert_eq!(

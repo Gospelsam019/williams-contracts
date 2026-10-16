@@ -185,6 +185,99 @@ Neither has any redundant storage access left to remove; both were already at
 that floor before this pass. Their numbers are unchanged, and the honest
 finding is that the waste was elsewhere.
 
+## Ledger close-time monitoring and `DAY_IN_LEDGERS` maintenance (issue #42)
+
+`DAY_IN_LEDGERS = 17_280` is derived from an assumed **5-second average ledger
+close time** on the Stellar network (`86,400 s/day ÷ 5 s/ledger`). It is a
+compiled constant — changing it requires a contract redeployment. All storage
+TTL margins (`LIFETIME_THRESHOLD` and `BUMP_AMOUNT`) are expressed as multiples
+of this constant, so a sustained drift in the real close time shifts the
+effective wall-clock safety margin proportionally.
+
+### Safe thresholds and error margins
+
+| Scenario | Effective `BUMP_AMOUNT` wall-clock | Action required? |
+| --- | --- | --- |
+| Close time stays at 5 s | ~60 days | None |
+| Close time drifts to 6 s | ~50 days | Monitor; no immediate action |
+| Close time drifts to 7 s | ~43 days | Consider redeployment before next major upgrade |
+| Close time doubles to 10 s | ~30 days | Redeployment strongly recommended |
+| Close time halves to 2.5 s | ~120 days | Wastes rent; update at next convenient upgrade |
+
+The 60-day window is chosen to dwarf realistic drift: a 20% change in close
+time (5 s → 6 s) reduces the effective margin by ~10 days, still leaving a
+50-day runway to notice and plan a redeployment.
+
+### Monitoring procedure
+
+1. **Weekly**: query the Stellar Horizon statistics endpoint or a public
+   explorer (e.g. Stellar.Expert) and record the 7-day median ledger close
+   time.
+2. **Alert threshold**: open a tracking issue when the rolling 7-day median
+   exceeds **6.5 seconds** or drops below **4 seconds** (±30% of the nominal
+   5 s). Neither value requires immediate action, but both indicate the
+   constant should be reviewed at the next planned deployment.
+3. **Action threshold**: schedule a redeployment when the 30-day median
+   consistently exceeds **8 seconds** or drops below **3 seconds** (±60%
+   of nominal). At 8 s, `BUMP_AMOUNT` is roughly 37.5 days, which is still
+   above `LIFETIME_THRESHOLD` (30 days equivalent) but leaves little margin.
+
+### How to update the constant
+
+If a redeployment is warranted:
+
+1. Update `DAY_IN_LEDGERS` in `contracts/will/src/storage.rs`:
+   ```rust
+   // Example for a 6-second average close time:
+   const DAY_IN_LEDGERS: u32 = 14_400; // 86_400 s/day ÷ 6 s/ledger
+   ```
+2. `LIFETIME_THRESHOLD` and `BUMP_AMOUNT` update automatically because they
+   are multiples of `DAY_IN_LEDGERS`; no further edits are required.
+3. Re-run the resource profile (`cargo test -p will --lib profile -- --nocapture`)
+   and update the table in this document if the rent figures change materially.
+4. Existing deployed wills are unaffected until their next TTL-extending
+   operation (e.g. `check_in`, `create_will`), which will bump them out to
+   the new `BUMP_AMOUNT`.
+
+## Hot/cold struct-split benchmark and v2 schema recommendation (issue #43)
+
+The `profile_check_in_hot_cold_baseline` scenario in
+[`contracts/will/src/profile.rs`](../contracts/will/src/profile.rs) measures
+`check_in` write bytes at 1, 5, and 10 beneficiaries. Because `check_in` writes
+the entire `Will` struct on every call, its write-byte cost grows linearly with
+the size of the beneficiary list — even though `check_in` only modifies
+`last_checkin`. Run it with:
+
+```sh
+cargo test -p will --lib profile_check_in_hot_cold_baseline -- --nocapture
+```
+
+### Expected baseline (5-second close time, 5 beneficiaries / 2 guardians)
+
+| beneficiaries | write bytes | notes |
+| ---: | ---: | --- |
+| 1 | ~456 | minimal will |
+| 5 | ~1 188 | standard profile size (matches current profile table) |
+| 10 | ~1 900 | near `MAX_BENEFICIARIES` |
+
+These are the baselines to compare against after a hot/cold migration.
+
+### v2 schema migration recommendation
+
+Splitting `Will` into `WillState` (hot: `last_checkin`, `status`,
+`trigger_time`, `guardian_votes`, `balance`) and `WillConfig` (cold:
+beneficiaries, guardians, `checkin_period_days`, `grace_period_days`) would
+reduce `check_in` write bytes to roughly the `WillState` fraction — near the
+"1 beneficiary" baseline above regardless of list size, a saving of ~5× at the
+standard profile size.
+
+The trade-off: `get_will` would need two reads instead of one, and any already-
+deployed will would require migration before the hot key becomes available. This
+makes the split the right change before mainnet launch, when the migration cost
+is zero, and a poor choice after a large deployment without a comprehensive
+migration path. See the ["What was considered and rejected"](#what-was-considered-and-rejected)
+section for the detailed earlier analysis.
+
 ## `create_will` cost as protocol-wide distinct tokens grow
 
 `ProtocolStats.total_locked_by_token` is a `Vec<TokenLockedBalance>` stored as
@@ -265,14 +358,15 @@ fn profile_create_will_token_scaling(report: &mut Report) {
 See [`docs/adr/0002-total-locked-by-token-scalability.md`](adr/0002-total-locked-by-token-scalability.md)
 for the full analysis, options considered, and recommended fix.
 
-## An observation, not addressed here
+## Contract instance storage TTL renewal (Resolved — Issue #21)
 
-Nothing in the contract renews its own instance entry. A contract instance is
-written once at deployment with a short default lifetime, and if it archives,
-every call fails until someone restores it. Most contracts call
-`env.storage().instance().extend_ttl(...)` in their entry points to prevent
-this. The profile has to renew the instance from the test side to make its
-long-jump scenarios work at all, which is how this surfaced.
+Previously, nothing in the contract renewed its own instance entry outside of
+`next_will_id`. If a deployment experienced an extended period with no new wills
+created, the contract instance could expire and archive, causing subsequent calls
+to revert until restored.
 
-Adding those bumps would *increase* per-call cost, so it does not belong in a
-pass about reducing it — but it is a liveness question worth a separate look.
+This has been resolved: `env.storage().instance().extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT)`
+is now invoked across high-frequency state-mutating entrypoints (`check_in`,
+`batch_check_in`, `top_up`, `trigger_will`) and key lifecycle operations
+(`emergency_checkin`, `release_inheritance`). Active wills now keep the parent
+contract instance alive without requiring external restoration.

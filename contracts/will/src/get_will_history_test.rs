@@ -74,9 +74,8 @@ fn create_will(
 }
 
 /// Cycles the will Active → Triggered → Active `rounds` times. Each round
-/// records a `trigger` and an `emerg` transition; `check_in` resets the
-/// deadline without recording one, so a round adds exactly two entries on top
-/// of the single `create` transition.
+/// records a `checkin`, `trigger` and an `emerg` transition, so a round adds
+/// three entries on top of the single `create` transition (#500).
 fn cycle(env: &Env, client: &WillContractClient<'_>, owner: &Address, will_id: u64, rounds: u32) {
     for _ in 0..rounds {
         // check_in resets the deadline so the next trigger is due.
@@ -199,9 +198,9 @@ fn history_shorter_than_the_cap_is_returned_whole() {
 
     cycle(&env, &client, &owner, will_id, 3);
 
-    // 1 create + 2 per round (trigger, emerg) = 7, comfortably under the cap.
+    // 1 create + 3 per round (checkin, trigger, emerg) = 10, comfortably under the cap.
     let history = client.get_will_history(&will_id);
-    assert_eq!(history.len(), 7);
+    assert_eq!(history.len(), 10);
     assert_eq!(actions(&history).get(0).unwrap(), symbol_short!("create"));
 }
 
@@ -223,20 +222,24 @@ fn history_pages_walk_the_whole_trail_without_gaps_or_duplicates() {
 
     cycle(&env, &client, &owner, will_id, 10);
 
-    // Walk the trail in pages of 4 and reassemble it.
+    // Walk the trail in pages of 4 and reassemble it using seq-based cursors
+    // (#59). After each page, the next cursor is the seq of the last entry
+    // received; entries with seq strictly greater than that are returned next.
     const PAGE: u32 = 4;
     let mut walked: Vec<WillStatusTransition> = Vec::new(&env);
-    let mut cursor: u32 = 0;
+    let mut cursor: Option<u32> = None;
     loop {
-        let page = client.get_will_history_page(&will_id, &Some(cursor), &PAGE);
+        let page = client.get_will_history_page(&will_id, &cursor, &PAGE);
         if page.is_empty() {
             break;
         }
         assert!(page.len() <= PAGE, "a page must never exceed the limit");
+        // Advance the cursor to the seq of the last entry on this page.
+        let last_seq = page.get(page.len() - 1).unwrap().seq as u32;
+        cursor = Some(last_seq);
         for entry in page.iter() {
             walked.push_back(entry);
         }
-        cursor += PAGE;
     }
 
     let whole = client.get_will_history(&will_id);

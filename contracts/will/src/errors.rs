@@ -52,27 +52,15 @@ pub enum WillError {
     /// Token-list bounds are deliberately *not* reported here: an empty or
     /// over-long `tokens` list raises [`WillError::InvalidTokenCount`] (#390).
     TooManyBeneficiaries = 12,
-    /// The requested action requires the will to be `Released` or `Cancelled`.
+    /// The requested action requires the will to be `Released`, `Cancelled` or
+    /// `Settled` (a will closed via `close_will`).
     WillNotSettled = 13,
-    /// The requested action requires the will to be `Released`.
-    WillNotReleased = 23,
     /// Cannot merge: both wills must be owned by the same address.
-    NotSameOwner = 24,
-    /// Cannot merge: one or both wills are not in Active status.
     WillNotBothActive = 14,
     /// Cannot merge: same will id provided for both wills.
     SameWillId = 15,
     /// Cannot merge: merging would result in too many beneficiaries or guardians.
     MergeWouldExceedLimits = 16,
-    /// A check-in or grace period was zero, or long enough that the resulting
-    /// deadline could not be represented as a ledger timestamp.
-    InvalidPeriod = 25,
-    /// The same address was supplied more than once in a guardian list.
-    DuplicateGuardian = 26,
-    /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
-    /// blocked until the cooldown period passes after the last guardian-list
-    /// change.
-    GuardianCooldownActive = 27,
     /// The owner cannot designate themselves as a guardian of their own will.
     OwnerCannotBeGuardian = 17,
     /// A beneficiary is not found in the will's beneficiary list.
@@ -117,6 +105,19 @@ pub enum WillError {
     /// contract. Every `Percentage` share, by contrast, must still sum to
     /// exactly 10,000 basis points, or `InvalidPercentages` is raised.
     FixedAmountExceedsBalance = 21,
+    /// The requested action requires the will to be `Released`.
+    WillNotReleased = 23,
+    /// Cannot merge: both wills must be owned by the same address.
+    NotSameOwner = 24,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 25,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 26,
+    /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
+    /// blocked until the cooldown period passes after the last guardian-list
+    /// change.
+    GuardianCooldownActive = 27,
     /// A supplied token address does not respond to a read-only `decimals()`
     /// probe, indicating it is not a valid SEP-41 token.
     InvalidToken = 28,
@@ -149,19 +150,6 @@ pub enum WillError {
     /// the will's balance for some token. Aborts the release rather than
     /// silently leaving (or over-paying) funds in the contract (#456).
     DistributionMismatch = 39,
-    /// A stored will could not be decoded as the current `Will` layout or any
-    /// known legacy layout (see `migration.rs`).
-    ///
-    /// #751 — previously also `= 39`, colliding with `DistributionMismatch`:
-    /// a hard compile error (duplicate discriminant), found while fixing
-    /// unrelated issues in this same file and corrected alongside them since
-    /// nothing else in this repo could compile until it was.
-    UnsupportedSchemaVersion = 51,
-    /// Cannot merge: the two wills' primary tokens differ, so summing their
-    /// legacy `balance` fields would be nonsensical.
-    ///
-    /// #751 — previously also `= 39`; see `UnsupportedSchemaVersion` above.
-    PrimaryTokenMismatch = 52,
     /// The same token address was supplied more than once in a `tokens`
     /// list. `create_will` documents each token address as unique, and a
     /// duplicated entry would make the legacy `balance` mirror disagree with
@@ -219,15 +207,27 @@ pub enum WillError {
     /// it was already retried successfully, or the arguments do not match any
     /// payout `distribute` attempted (#459).
     NoFailedPayout = 50,
+    /// A stored will could not be decoded as the current `Will` layout or any
+    /// known legacy layout (see `migration.rs`).
+    ///
+    /// #751 — previously also `= 39`, colliding with `DistributionMismatch`:
+    /// a hard compile error (duplicate discriminant), found while fixing
+    /// unrelated issues in this same file and corrected alongside them since
+    /// nothing else in this repo could compile until it was.
+    UnsupportedSchemaVersion = 51,
+    /// Cannot merge: the two wills' primary tokens differ, so summing their
+    /// legacy `balance` fields would be nonsensical.
+    ///
+    /// #751 — previously also `= 39`; see `UnsupportedSchemaVersion` above.
+    PrimaryTokenMismatch = 52,
     /// `update_guardians`, `update_guardians_weighted` or the guardian branch
     /// of `update_will_settings` was called while guardian-cancel votes were
     /// still recorded against the current guardian list. Replacing the list
     /// would wipe those votes and let a fresh trigger bypass a cancel that was
     /// accumulating against it, so the update is refused (#488).
     GuardianCancelInProgress = 53,
-    /// `set_keeper_bounty_token` was called with a token the will does not
-    /// currently hold. The bounty is carved out of a balance the will holds,
-    /// so naming any other token could never pay from it and would silently
-    /// degrade to no bounty at all (#109).
-    InvalidBountyToken = 54,
+    /// `refund_unconfirmed_will` was called before the confirmation deadline
+    /// plus grace margin had elapsed (#40).
+    ConfirmationWindowNotExpired = 54,
 }
+
