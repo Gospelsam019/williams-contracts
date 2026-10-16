@@ -51,17 +51,17 @@ use crate::types::{
 /// days instead of 60, which is more than enough runway to notice and redeploy.
 /// Only a sustained, large deviation (close time roughly doubling) would
 /// shrink the effective window below a safe threshold.
-const DAY_IN_LEDGERS: u32 = 17_280; // 86_400 s/day ÷ 5 s/ledger
+pub const DAY_IN_LEDGERS: u32 = 17_280; // 86_400 s/day ÷ 5 s/ledger
 
 /// Extend TTL once remaining lifetime drops below this many ledgers (~30 days
 /// at the current 5-second close time; see `DAY_IN_LEDGERS` for how to adjust
 /// this if the network's average close time changes).
-const LIFETIME_THRESHOLD: u32 = DAY_IN_LEDGERS * 30;
+pub const LIFETIME_THRESHOLD: u32 = DAY_IN_LEDGERS * 30;
 
 /// Extend TTL out to this many ledgers when a bump is triggered (~60 days at
 /// the current 5-second close time; see `DAY_IN_LEDGERS` for adjustment
 /// guidance and the rationale for the extra safety margin).
-const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+pub const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
 
 /// Seconds in a day, used to convert day-denominated expiry windows.
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -87,6 +87,12 @@ pub(crate) enum DataKey {
     NextWillId,
     /// Aggregate protocol statistics tracked on-chain.
     ProtocolStats,
+    /// Active will count counter.
+    ActiveWillCount,
+    /// List of distinct tokens currently with active locked balances in the protocol.
+    ProtocolTokens,
+    /// Discrete total locked amount for a single token across the protocol.
+    TotalLocked(Address),
     /// Full state of a will, keyed by its id.
     Will(u64),
     /// List of will ids owned by an address.
@@ -138,88 +144,183 @@ pub struct GuardianVoteRecord {
 /// that threshold is crossed. These constants mirror the values used for every
 /// persistent-storage entry in the contract so the instance lifecycle is
 /// managed consistently with the rest of the on-chain state.
+/// Extends the contract instance storage TTL using [`LIFETIME_THRESHOLD`] and [`BUMP_AMOUNT`].
+///
+/// Refreshes the instance entry on high-frequency state-mutating entrypoints (check_in,
+/// batch_check_in, top_up, trigger_will) and lifecycle events so that active wills keep
+/// the parent contract instance alive even when no new wills are being created.
+pub fn bump_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
 pub fn next_will_id(env: &Env) -> u64 {
     let key = DataKey::NextWillId;
     let current: u64 = env.storage().instance().get(&key).unwrap_or(0);
     let next = current + 1;
     env.storage().instance().set(&key, &next);
     // Keep the contract instance alive for as long as the longest-lived will
-    // it could ever serve. Without an explicit bump here, the instance TTL is
-    // only extended by whatever the platform applies automatically (if
-    // anything), whereas every other storage entry in this codebase bumps its
-    // own TTL. This call brings instance storage in line with that policy.
-    env.storage()
-        .instance()
-        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    // it could ever serve.
+    bump_instance_ttl(env);
     next
 }
 
-/// Loads the current protocol statistics from instance storage.
-pub fn get_protocol_stats(env: &Env) -> ProtocolStats {
-    let key = DataKey::ProtocolStats;
-    env.storage()
-        .instance()
-        .get(&key)
-        .unwrap_or_else(|| ProtocolStats {
-            active_will_count: 0,
-            total_locked_by_token: Vec::new(env),
-        })
+/// Reads the total locked balance for a specific token from its discrete storage entry.
+pub fn get_total_locked(env: &Env, token: &Address) -> i128 {
+    let key = DataKey::TotalLocked(token.clone());
+    if let Some(val) = env.storage().persistent().get(&key) {
+        val
+    } else if let Some(val) = env.storage().instance().get(&key) {
+        val
+    } else if let Some(stats) = env.storage().instance().get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+        for entry in stats.total_locked_by_token.iter() {
+            if entry.token == *token {
+                return entry.total_locked;
+            }
+        }
+        0
+    } else {
+        0
+    }
 }
 
-/// Persists protocol statistics in instance storage.
+/// Sets the total locked balance for a specific token in discrete persistent storage.
+pub fn set_total_locked(env: &Env, token: &Address, amount: i128) {
+    let key = DataKey::TotalLocked(token.clone());
+    if amount != 0 {
+        env.storage().persistent().set(&key, &amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Loads the list of tokens with active locked balances.
+pub fn get_protocol_tokens(env: &Env) -> Vec<Address> {
+    if let Some(tokens) = env.storage().instance().get(&DataKey::ProtocolTokens) {
+        tokens
+    } else if let Some(stats) = env.storage().instance().get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+        let mut tokens = Vec::new(env);
+        for entry in stats.total_locked_by_token.iter() {
+            tokens.push_back(entry.token);
+        }
+        tokens
+    } else {
+        Vec::new(env)
+    }
+}
+
+/// Gets the current active will count.
+pub fn get_active_will_count(env: &Env) -> u64 {
+    if let Some(count) = env.storage().instance().get(&DataKey::ActiveWillCount) {
+        count
+    } else if let Some(stats) = env.storage().instance().get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+        stats.active_will_count
+    } else {
+        0
+    }
+}
+
+/// Sets the current active will count.
+pub fn set_active_will_count(env: &Env, count: u64) {
+    env.storage().instance().set(&DataKey::ActiveWillCount, &count);
+}
+
+/// Loads the current protocol statistics from instance and persistent storage.
+///
+/// Reconstructed from discrete `DataKey::TotalLocked(Address)` entries at query time
+/// for backward compatibility with external callers and SDK clients.
+pub fn get_protocol_stats(env: &Env) -> ProtocolStats {
+    let active_will_count = get_active_will_count(env);
+    let tokens = get_protocol_tokens(env);
+    let mut total_locked_by_token = Vec::new(env);
+    for token in tokens.iter() {
+        let total = get_total_locked(env, &token);
+        if total != 0 {
+            total_locked_by_token.push_back(TokenLockedBalance {
+                token,
+                total_locked: total,
+            });
+        }
+    }
+    ProtocolStats {
+        active_will_count,
+        total_locked_by_token,
+    }
+}
+
+/// Persists protocol statistics into discrete storage entries and instance storage.
 pub fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
+    set_active_will_count(env, stats.active_will_count);
+    let old_tokens = get_protocol_tokens(env);
+    for token in old_tokens.iter() {
+        env.storage().persistent().remove(&DataKey::TotalLocked(token.clone()));
+        env.storage().instance().remove(&DataKey::TotalLocked(token));
+    }
+    let mut tokens = Vec::new(env);
+    for entry in stats.total_locked_by_token.iter() {
+        if entry.total_locked != 0 {
+            tokens.push_back(entry.token.clone());
+            set_total_locked(env, &entry.token, entry.total_locked);
+        }
+    }
+    env.storage().instance().set(&DataKey::ProtocolTokens, &tokens);
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
 }
 
 /// Increments the active-will counter by one.
 pub fn increment_active_will_count(env: &Env) {
-    let mut stats = get_protocol_stats(env);
-    stats.active_will_count += 1;
-    save_protocol_stats(env, &stats);
+    let count = get_active_will_count(env);
+    set_active_will_count(env, count + 1);
 }
 
 /// Decrements the active-will counter by one if it is greater than zero.
 pub fn decrement_active_will_count(env: &Env) {
-    let mut stats = get_protocol_stats(env);
-    if stats.active_will_count > 0 {
-        stats.active_will_count -= 1;
+    let count = get_active_will_count(env);
+    if count > 0 {
+        set_active_will_count(env, count - 1);
     }
-    save_protocol_stats(env, &stats);
 }
 
-/// Adds or subtracts a token amount from the protocol's locked-balance
-/// totals.
+/// Adds or subtracts a token amount from the protocol's locked-balance totals.
 ///
-/// An entry whose `total_locked` returns to exactly zero is dropped rather
-/// than kept as a permanent zero-balance row -- otherwise
-/// `total_locked_by_token` grows by one entry per distinct token ever used,
-/// forever, even for tokens with no current usage (#264).
+/// Refactored to operate directly on `DataKey::TotalLocked(Address)` in persistent storage,
+/// eliminating vector scans and instance storage serialization overhead, keeping
+/// per-transaction read/write footprint and gas consumption constant regardless of the
+/// number of distinct tokens used in the protocol.
 pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
-    let mut stats = get_protocol_stats(env);
-    let mut found = false;
-    let mut updated = Vec::new(env);
-    for entry in stats.total_locked_by_token.iter() {
-        if entry.token == *token {
-            found = true;
-            let next_total = entry.total_locked + delta;
-            if next_total != 0 {
-                updated.push_back(TokenLockedBalance {
-                    token: entry.token.clone(),
-                    total_locked: next_total,
-                });
+    if delta == 0 {
+        return;
+    }
+    let key = DataKey::TotalLocked(token.clone());
+    let current = get_total_locked(env, token);
+    let next_total = current + delta;
+    if next_total != 0 {
+        env.storage().persistent().set(&key, &next_total);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+        if current == 0 {
+            let mut tokens = get_protocol_tokens(env);
+            if !tokens.contains(token.clone()) {
+                tokens.push_back(token.clone());
+                env.storage().instance().set(&DataKey::ProtocolTokens, &tokens);
             }
-        } else {
-            updated.push_back(entry.clone());
         }
+    } else {
+        env.storage().persistent().remove(&key);
+        let tokens = get_protocol_tokens(env);
+        let mut updated = Vec::new(env);
+        for t in tokens.iter() {
+            if t != *token {
+                updated.push_back(t);
+            }
+        }
+        env.storage().instance().set(&DataKey::ProtocolTokens, &updated);
     }
-    if !found && delta != 0 {
-        updated.push_back(TokenLockedBalance {
-            token: token.clone(),
-            total_locked: delta,
-        });
-    }
-    stats.total_locked_by_token = updated;
-    save_protocol_stats(env, &stats);
 }
 
 /// Applies `sign * amount` to the protocol's locked totals for every entry in
@@ -243,14 +344,96 @@ pub fn is_live_status(status: WillStatus) -> bool {
     )
 }
 
+/// Recomputes protocol statistics across a bounded range of will IDs: `[start_id, start_id + batch_size)`.
+///
+/// Returns `(chunk_stats, next_id, is_complete)`:
+/// - `chunk_stats`: live will counts and balance totals accumulated within this range.
+/// - `next_id`: next will ID to query in subsequent chunks.
+/// - `is_complete`: true if `last_id` has been reached.
+///
+/// # Transaction limit constraints
+/// Soroban imposes strict per-transaction limits on ledger read footprints (maximum 40
+/// read entries) and CPU instructions. Recomputing across all wills in a single transaction
+/// will exceed the transaction footprint budget once `last_id` exceeds a few dozen wills.
+/// For on-chain execution, callers must use chunked execution with a bounded `batch_size` (e.g. <= 20).
+pub fn recompute_protocol_stats_chunk(
+    env: &Env,
+    start_id: u64,
+    batch_size: u32,
+) -> (ProtocolStats, u64, bool) {
+    let last_id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextWillId)
+        .unwrap_or(0);
+
+    if start_id > last_id || batch_size == 0 {
+        return (
+            ProtocolStats {
+                active_will_count: 0,
+                total_locked_by_token: Vec::new(env),
+            },
+            start_id,
+            true,
+        );
+    }
+
+    let end_id = (start_id + batch_size as u64 - 1).min(last_id);
+    let mut active_will_count: u64 = 0;
+    let mut totals: Map<Address, i128> = Map::new(env);
+    let mut id = start_id;
+
+    while id <= end_id {
+        if let Some(will) = env
+            .storage()
+            .persistent()
+            .get::<_, Will>(&DataKey::Will(id))
+        {
+            if is_live_status(will.status) {
+                active_will_count += 1;
+                for (token, amount) in will.balances.iter() {
+                    let prev = totals.get(token.clone()).unwrap_or(0);
+                    totals.set(token, prev + amount);
+                }
+            }
+        }
+        id += 1;
+    }
+
+    let mut total_locked_by_token = Vec::new(env);
+    for (token, total) in totals.iter() {
+        total_locked_by_token.push_back(TokenLockedBalance {
+            token,
+            total_locked: total,
+        });
+    }
+
+    let next_id = end_id + 1;
+    let is_complete = next_id > last_id;
+
+    (
+        ProtocolStats {
+            active_will_count,
+            total_locked_by_token,
+        },
+        next_id,
+        is_complete,
+    )
+}
+
 /// Recomputes protocol statistics from scratch by walking every will id ever
 /// allocated (`1..=NextWillId`) and summing live wills.
 ///
-/// Archived wills live under `DataKey::ArchivedWill` and are terminal, so
-/// they are skipped along with any id whose entry no longer exists. Each id
-/// costs one persistent read, so this is only intended for audits/repairs and
-/// will exceed the per-transaction budget once the protocol holds enough
-/// wills; callers should fall back to off-chain reconciliation at that point.
+/// # Transaction limit constraints & Off-chain simulation only
+///
+/// Each will ID check requires a persistent storage read (`DataKey::Will(id)`).
+/// Soroban enforces a strict ceiling on transaction ledger read entries (40 entries)
+/// and CPU instructions. Calling this function in an on-chain transaction when `NextWillId`
+/// exceeds several dozen wills is guaranteed to fail due to footprint budget exhaustion.
+///
+/// This function is explicitly scoped to **off-chain simulation** (e.g. via RPC `simulateTransaction`)
+/// or local audit helpers. For on-chain execution, use [`recompute_protocol_stats_chunk`] to paginate
+/// through the ID space within the per-transaction budget.
 pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
     let last_id: u64 = env
         .storage()
@@ -1218,9 +1401,12 @@ pub fn paginate_history(
 /// at the audit trail as a post-release recovery path — must use the off-chain
 /// event log instead. That guidance is updated there to match.
 pub fn archive_will(env: &Env, will: &Will) {
-    // Move will to archived storage (no TTL extension)
+    // Move will to archived storage with managed persistent storage TTL
     let archival_key = DataKey::ArchivedWill(will.id);
     env.storage().persistent().set(&archival_key, will);
+    env.storage()
+        .persistent()
+        .extend_ttl(&archival_key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 
     // Remove from active storage
     let active_key = DataKey::Will(will.id);
@@ -1271,6 +1457,29 @@ pub fn archive_will(env: &Env, will: &Will) {
     env.storage()
         .persistent()
         .remove(&DataKey::WillHistorySeq(will.id));
+}
+
+/// Loads an archived will by id from persistent storage.
+pub fn load_archived_will(env: &Env, will_id: u64) -> Result<Will, WillError> {
+    let key = DataKey::ArchivedWill(will_id);
+    let raw: Val = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(WillError::WillNotFound)?;
+    migration::decode_will(env, &raw)
+}
+
+/// Extends the persistent storage TTL of an archived will record.
+pub fn extend_archived_will_ttl(env: &Env, will_id: u64) -> Result<(), WillError> {
+    let key = DataKey::ArchivedWill(will_id);
+    if !env.storage().persistent().has(&key) {
+        return Err(WillError::WillNotFound);
+    }
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    Ok(())
 }
 
 /// Records (or overwrites) the amount of `token` still owed to `recipient`
