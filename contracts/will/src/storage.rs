@@ -979,22 +979,43 @@ pub fn paginate_ids(env: &Env, ids: &Vec<u64>, cursor: Option<u64>, limit: u32) 
     // a page can never contain an id at or below the cursor.
     if let Some(cursor_val) = cursor {
         // The index is ascending, so its last entry is the largest id.
+        // Short-circuit: if the cursor is at-or-beyond the last id in the
+        // index, no entry can satisfy `id > cursor_val`, so return empty
+        // without iterating at all.
         match ids.last() {
             Some(last) if cursor_val < last => {}
             _ => return result,
         }
     }
 
-    for id in ids.iter() {
-        if let Some(cursor_val) = cursor {
+    // Use a separate counter so we avoid calling `result.len()` (a Soroban
+    // `Vec` operation) on every iteration, and hoist the cursor branch out
+    // of the hot path with two separate loops — one for the cursor case and
+    // one for the full-scan case. This eliminates the repeated `if let`
+    // Option-unpacking inside the loop and lets the compiler see the branch
+    // as unconditionally absent or present for the duration of the call.
+    let mut count: u32 = 0;
+    if let Some(cursor_val) = cursor {
+        for id in ids.iter() {
             if id <= cursor_val {
+                // Skip every id at or below the cursor; the index is
+                // ascending so all qualifying ids come after this run.
                 continue;
             }
+            result.push_back(id);
+            count += 1;
+            if count >= page_size {
+                break;
+            }
         }
-        if result.len() >= page_size {
-            break;
+    } else {
+        for id in ids.iter() {
+            result.push_back(id);
+            count += 1;
+            if count >= page_size {
+                break;
+            }
         }
-        result.push_back(id);
     }
     result
 }
@@ -1140,14 +1161,33 @@ pub fn paginate_history(
     let page_size = limit.min(MAX_PAGE_SIZE);
     let start = cursor.unwrap_or(0);
     let mut result = Vec::new(env);
-    let mut index = 0u32;
-    for entry in history.iter() {
-        if index >= start && result.len() < page_size {
-            result.push_back(entry);
-        }
-        index += 1;
-        if index >= start.saturating_add(page_size) {
+
+    // Short-circuit: if page_size is zero or the requested start is beyond
+    // the end of the trail, return empty without iterating.
+    if page_size == 0 || start as usize >= history.len() as usize {
+        return result;
+    }
+
+    // Compute the end offset before iterating so we can break with a simple
+    // counter comparison rather than calling `result.len()` (a Soroban Vec
+    // operation) on every step. `saturating_add` prevents overflow when
+    // `start` is near `u32::MAX`.
+    let end = start.saturating_add(page_size);
+    let mut count: u32 = 0;
+    for (index, entry) in (0_u32..).zip(history.iter()) {
+        if index >= end {
             break;
+        }
+        if index >= start {
+            result.push_back(entry);
+            count += 1;
+            // Once we've collected page_size entries we can stop; this check
+            // is redundant with the `end` guard above but makes the intent
+            // explicit and avoids any off-by-one if page_size or start ever
+            // change semantics.
+            if count >= page_size {
+                break;
+            }
         }
     }
     result
