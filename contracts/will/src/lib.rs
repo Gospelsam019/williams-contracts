@@ -192,6 +192,12 @@ mod issue_499_test;
 #[cfg(test)]
 mod issue_500_test;
 
+/// Regression test for issue #41: `OwnerWills` reverse index TTL is refreshed
+/// during `check_in`, `trigger_will`, and `get_wills_by_owner` so that long
+/// owner inactivity does not silently expire the index and strand will ids.
+#[cfg(test)]
+mod issue_41_test;
+
 /// Regression test for issue #184: `merge_wills` refuses mismatched primary tokens.
 #[cfg(test)]
 mod issue_184_test;
@@ -1011,6 +1017,12 @@ impl WillContract {
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
+        // Refresh the owner index TTL on every check-in so that an account
+        // inactive for longer than BUMP_AMOUNT ledgers (roughly 60 days) does
+        // not find its OwnerWills entry expired the next time it calls
+        // create_will (#41).
+        storage::refresh_owner_index_ttl(&env, &will.owner);
+
         // Record the check-in in the same audit trail status transitions use
         // (#500). `status` does not change, so this is a same-status entry
         // (`Active` -> `Active`); what matters is that every event that moves
@@ -1145,6 +1157,12 @@ impl WillContract {
         will.trigger_time = Some(deadline);
         let grace_period_ends = grace_deadline(&will);
         storage::save_will(&env, &will);
+
+        // Refresh the owner index TTL so that an owner account that has gone
+        // inactive long enough for its OwnerWills entry to approach expiry
+        // does not lose indexed wills if it resumes activity after the trigger
+        // cycle (#41).
+        storage::refresh_owner_index_ttl(&env, &will.owner);
 
         storage::index_triggered_will(&env, will_id);
 
@@ -4229,13 +4247,15 @@ impl WillContract {
 
         // A repeated address would silently collapse in the filter below and
         // leave the source and child disagreeing about how many beneficiaries
-        // moved, so reject it up front.
-        for (i, s) in beneficiaries_to_split.iter().enumerate() {
-            for other in beneficiaries_to_split.iter().skip(i + 1) {
-                if s.address == other.address {
-                    panic_with_error!(&env, WillError::DuplicateBeneficiary);
-                }
-            }
+        // moved, so reject it up front using the shared duplicate-detection
+        // helper (#44). The `DuplicateBeneficiary` error code (rather than
+        // `InvalidSplit`) makes sense here: the caller supplied an invalid
+        // beneficiary list, same as in `create_will`.
+        split_uniqueness_check::assert_no_duplicate_beneficiary_addresses(&env, &beneficiaries_to_split);
+
+        // Verify every address in beneficiaries_to_split actually exists on
+        // the source will before attempting the split.
+        for s in beneficiaries_to_split.iter() {
             if !names_address(&source.beneficiaries, &s.address) {
                 panic_with_error!(&env, WillError::BeneficiaryNotFound);
             }
@@ -4867,6 +4887,9 @@ fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, primary
     let mut fixed_total: i128 = 0;
     let mut has_percentage = false;
 
+    // Check for duplicate addresses first using the shared helper (#44).
+    split_uniqueness_check::assert_no_duplicate_beneficiary_addresses(env, beneficiaries);
+
     for i in 0..beneficiaries.len() {
         let beneficiary = beneficiaries.get_unchecked(i);
         match beneficiary.allocation {
@@ -4882,11 +4905,6 @@ fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, primary
                     panic_with_error!(env, WillError::InvalidPercentages);
                 }
                 fixed_total = fixed_total.saturating_add(amount);
-            }
-        }
-        for j in (i + 1)..beneficiaries.len() {
-            if beneficiary.address == beneficiaries.get_unchecked(j).address {
-                panic_with_error!(env, WillError::DuplicateBeneficiary);
             }
         }
     }
