@@ -20,9 +20,10 @@ use soroban_sdk::{
 };
 
 use crate::fuzz_harness::{
-    run_create_will, run_merge_wills, run_split_will, run_update_beneficiaries, sanitize_specs,
-    BeneficiarySpec, CreateWillInput, MergeWillsInput, Outcome, SplitWillInput,
-    UpdateBeneficiariesInput, MAX_FUZZ_UPDATES,
+    run_create_will, run_merge_wills, run_multi_token_distribution, run_split_will,
+    run_update_beneficiaries, sanitize_specs, BeneficiarySpec, CreateWillInput, MergeWillsInput,
+    MixedAllocationSpec, MixedBeneficiarySpec, MultiTokenDistributionInput, Outcome,
+    SplitWillInput, UpdateBeneficiariesInput, MAX_FUZZ_UPDATES,
 };
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
 
@@ -315,6 +316,52 @@ proptest! {
             Outcome::Rejected => {}
         }
     }
+
+    /// Multi-token estates with mixed FixedAmount and Percentage allocations,
+    /// keeper bounties, and targeted bounty tokens must strictly conserve
+    /// balances across every token: sum(beneficiary_payouts) + bounty + refund == total_balance.
+    /// Dust must never be stranded in the contract.
+    #[test]
+    fn multi_token_mixed_distribution_conserves_all_balances(
+        input in multi_token_distribution_input_strategy(),
+    ) {
+        if let Outcome::Accepted(will_id) = run_multi_token_distribution(&input) {
+            prop_assert!(will_id >= 1);
+        }
+    }
+}
+
+fn mixed_beneficiary_strategy() -> impl Strategy<Value = MixedBeneficiarySpec> {
+    (
+        any::<u8>(),
+        prop_oneof![
+            1 => (1u32..=10_000).prop_map(MixedAllocationSpec::Percentage),
+            1 => (1i128..=100_000).prop_map(MixedAllocationSpec::FixedAmount),
+        ],
+    )
+        .prop_map(|(address_slot, allocation)| MixedBeneficiarySpec {
+            address_slot,
+            allocation,
+        })
+}
+
+fn multi_token_distribution_input_strategy() -> impl Strategy<Value = MultiTokenDistributionInput> {
+    (
+        prop::collection::vec(10_000i128..=10_000_000, 1..=3),
+        prop::collection::vec(mixed_beneficiary_strategy(), 1..=6),
+        0u32..=1000,
+        prop::option::of(any::<u8>()),
+    )
+        .prop_map(
+            |(token_amounts, beneficiaries, keeper_bounty_bps, target_bounty_token_idx)| {
+                MultiTokenDistributionInput {
+                    token_amounts,
+                    beneficiaries,
+                    keeper_bounty_bps,
+                    target_bounty_token_idx,
+                }
+            },
+        )
 }
 
 fn merge_wills_input_strategy() -> impl Strategy<Value = MergeWillsInput> {

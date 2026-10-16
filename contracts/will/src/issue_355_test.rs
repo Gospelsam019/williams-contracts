@@ -8,12 +8,13 @@
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, Symbol, TryFromVal as _,
+    vec, Address, Env,
 };
 
 use crate::batch_check_in_limit::MAX_BATCH_CHECK_IN;
+use crate::event_test_support as ev;
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
 
 const DAY: u64 = 86_400;
@@ -96,18 +97,8 @@ fn distinct_ids_each_produce_exactly_one_check_in_event() {
 
     // The topic is `(symbol_short!("checkin"), will_id)`, so match on the
     // leading symbol to cover every will in the batch.
-    let check_ins = env
-        .events()
-        .all()
-        .iter()
-        .filter(|e| {
-            Symbol::try_from_val(&env, &e.1.get(0).unwrap()) == Ok(symbol_short!("checkin"))
-        })
-        .count();
-    assert_eq!(
-        check_ins, N as usize,
-        "one check_in event per distinct will"
-    );
+    let check_ins = ev::count_events(&env, symbol_short!("checkin"));
+    assert_eq!(check_ins, N, "one check_in event per distinct will");
 }
 
 #[test]

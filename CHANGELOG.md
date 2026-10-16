@@ -53,13 +53,15 @@ gets its own [contract spec artifact](./spec) once exported.
 - `WillError` gained `InvalidBountyToken = 54`.
 
 ### Fixed
-- Three test modules (`issue_355_test`, `issue_357_test`, `issue_185_test`)
-  still used the pre-v28 `ContractEvents` API and broke `cargo test`
-  compilation for the whole crate; they are disabled with the same TODO note
-  the five sibling modules disabled for the identical breakage already carry
-  (`event_test`, `event_snapshot_test`, `archive_will_test`,
-  `migrate_will_test`, `uncovered_entrypoints_test`). The lib test target
-  compiles and runs again.
+- Restored GitHub Actions CI workflows (`.github/workflows/test.yml`) running formatting, clippy, unit/integration tests, and contract build on every PR and push to main (#28).
+- Automated WASM binary size verification check via `scripts/check-wasm-size.sh` integrated into CI to ensure the release binary stays within budget (#25).
+- Multi-token and mixed-allocation (`FixedAmount` and `Percentage`) property-based fuzz harness and fuzz target `multi_token_distribution`, rigorously verifying balance conservation across all tokens (#27).
+- Restored and migrated all eight disabled event test modules (`event_test`,
+  `event_snapshot_test`, `archive_will_test`, `migrate_will_test`,
+  `uncovered_entrypoints_test`, `issue_355_test`, `issue_357_test`,
+  `issue_185_test`) to the Soroban SDK v28 `ContractEvents` / XDR event API
+  via `event_test_support.rs`. Re-enabled all modules with 100% passing test
+  coverage (#26).
 - `get_wills_by_owner_and_status_page`, returning a `WillPage` with the page's
   wills, the `total_count` of all matches and an explicit `next_cursor` (#455).
 - `WillError::DistributionMismatch` (39): release aborts if planned payouts for

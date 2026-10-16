@@ -11,11 +11,12 @@
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, TryIntoVal,
+    vec, Address, Env,
 };
 
+use crate::event_test_support as ev;
 use crate::{
     storage, Allocation, Beneficiary, WillContract, WillContractClient, WillError,
     CURRENT_SCHEMA_VERSION,
@@ -93,17 +94,7 @@ fn set_schema_version(env: &Env, contract_id: &Address, will_id: u64, version: u
 
 /// Number of `will_migrated` events published so far.
 fn migrated_event_count(env: &Env) -> u32 {
-    let mut count = 0;
-    for event in env.events().all().iter() {
-        if event.1.is_empty() {
-            continue;
-        }
-        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(env);
-        if topic0 == Ok(symbol_short!("migrated")) {
-            count += 1;
-        }
-    }
-    count
+    ev::count_events(env, symbol_short!("migrated"))
 }
 
 #[test]

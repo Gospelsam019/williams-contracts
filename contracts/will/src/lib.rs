@@ -9,6 +9,8 @@
 // inherits that arg count on a synthetic item the attribute doesn't reach
 // when placed on the source function or the impl block, so it's set crate-wide.
 #![allow(clippy::too_many_arguments)]
+#![allow(deprecated)]
+#![allow(clippy::needless_borrows_for_generic_args)]
 
 //! Williams — a trustless on-chain inheritance and dead man's switch protocol
 //! for Stellar Soroban.
@@ -47,8 +49,8 @@
 mod batch_check_in_limit;
 mod errors;
 mod events;
-mod migration;
 mod guardian_vote_freshness;
+mod migration;
 mod split_uniqueness_check;
 mod storage;
 mod types;
@@ -61,7 +63,7 @@ pub mod fuzz_harness;
 /// Resource-cost profile for every public entry point. Measurement rather
 /// than assertion — see the module docs for how to read the numbers.
 #[cfg(test)]
-// mod profile; // TODO: InvocationResources API changed in soroban-sdk v28
+mod profile;
 
 #[cfg(test)]
 mod fuzz_test;
@@ -70,9 +72,15 @@ mod fuzz_test;
 #[cfg(test)]
 mod allocation_test;
 
+/// Shared helpers for asserting on contract events under the soroban-sdk v28
+/// `ContractEvents` API (see the module docs). Used by the migrated
+/// event-assertion tests.
+#[cfg(test)]
+mod event_test_support;
+
 /// Unit test asserting on the extended `will_created` event payload.
 #[cfg(test)]
-// mod event_test; // TODO: ContractEvents API changed in soroban-sdk v28
+mod event_test;
 
 /// Regression test: a beneficiary-list change must be the list actually
 /// used when the will is later triggered and released.
@@ -96,7 +104,7 @@ mod test_support;
 /// Unit tests for the `will_created` event payload extended with
 /// per-token breakdowns (see event_snapshot_test module docs).
 #[cfg(test)]
-// mod event_snapshot_test; // TODO: ContractEvents API changed in soroban-sdk v28
+mod event_snapshot_test;
 
 /// Regression coverage for triggered-will lifecycle bookkeeping.
 #[cfg(test)]
@@ -126,11 +134,11 @@ mod issue_183_test;
 #[cfg(test)]
 mod issue_354_test;
 #[cfg(test)]
-// mod issue_355_test; // TODO: ContractEvents API changed in soroban-sdk v28
+mod issue_355_test;
 #[cfg(test)]
 mod issue_356_test;
 #[cfg(test)]
-// mod issue_357_test; // TODO: ContractEvents API changed in soroban-sdk v28
+mod issue_357_test;
 /// Regression tests for issues #358-#361: the distinct-token cap in `top_up`,
 /// the shared guardian-vote expiry rule, `limit == 0` pagination parity in
 /// `get_wills_by_owner_and_status`, and renouncing the last beneficiary.
@@ -208,7 +216,7 @@ mod issue_184_test;
 
 /// Regression test for issue #185: `add_hashed_beneficiary` emits its lifecycle event.
 #[cfg(test)]
-// mod issue_185_test; // TODO: ContractEvents API changed in soroban-sdk v28
+mod issue_185_test;
 
 /// Regression test for issue #186: hashed-beneficiary percentages must use the
 /// same basis-point scale as the rest of the contract.
@@ -281,7 +289,13 @@ mod issue_372_test;
 // module tree by the PRs that added them, so they silently never compiled or
 // ran under `cargo test`.
 #[cfg(test)]
-// mod archive_will_test; // TODO: ContractEvents API changed
+mod archive_will_test;
+/// Regression tests for issue #498: `audit_protocol_stats`/`repair_protocol_stats`
+/// (added for #441) had no test coverage at all, and `ProtocolStatsAudit` --
+/// the type `audit_protocol_stats` returns -- was referenced but never
+/// defined, a compile error fixed alongside these tests.
+#[cfg(test)]
+mod audit_protocol_stats_test;
 #[cfg(test)]
 mod batch_create_test;
 #[cfg(test)]
@@ -316,17 +330,6 @@ mod issue_109_test;
 mod issue_259_test;
 #[cfg(test)]
 mod issue_260_test;
-/// Regression test for issue #51: `clone_will` validates owner and beneficiary
-/// index capacities before executing any token transfer, mirroring the
-/// Checks-Effects-Interactions order already enforced by `create_will`.
-#[cfg(test)]
-mod issue_51_test;
-/// Regression tests for issue #52: `clone_will` now deep-copies hashed
-/// beneficiary slots from the source will (resetting claimed flags) instead of
-/// dropping them, so the cloned will's visible + hashed basis points continue
-/// to satisfy the 10,000 bps invariant.
-#[cfg(test)]
-mod issue_52_test;
 #[cfg(test)]
 mod issue_261_test;
 #[cfg(test)]
@@ -343,13 +346,6 @@ mod issue_266_test;
 mod issue_272_test;
 #[cfg(test)]
 mod issue_277_test;
-/// Regression tests for issue #501: `.github/scripts/check-contract-version.sh`
-/// (referenced by CI and CONTRIBUTING.md but never actually committed) is
-/// added alongside these, plus a post-deploy on-chain check in
-/// `scripts/deploy-testnet.sh`, since a Soroban contract cannot read its own
-/// deployed Wasm's metadata back at runtime.
-#[cfg(test)]
-mod issue_501_test;
 #[cfg(test)]
 mod issue_278_test;
 #[cfg(test)]
@@ -373,21 +369,25 @@ mod issue_420_test;
 #[cfg(test)]
 mod issue_422_test;
 #[cfg(test)]
-// mod migrate_will_test; // TODO: ContractEvents API
+mod issue_490_493_test;
+/// Regression tests for issue #501: `.github/scripts/check-contract-version.sh`
+/// (referenced by CI and CONTRIBUTING.md but never actually committed) is
+/// added alongside these, plus a post-deploy on-chain check in
+/// `scripts/deploy-testnet.sh`, since a Soroban contract cannot read its own
+/// deployed Wasm's metadata back at runtime.
 #[cfg(test)]
-mod protocol_stats_test;
-/// Regression tests for issue #498: `audit_protocol_stats`/`repair_protocol_stats`
-/// (added for #441) had no test coverage at all, and `ProtocolStatsAudit` --
-/// the type `audit_protocol_stats` returns -- was referenced but never
-/// defined, a compile error fixed alongside these tests.
+mod issue_501_test;
+/// Regression test for issue #51: `clone_will` validates owner and beneficiary
+/// index capacities before executing any token transfer, mirroring the
+/// Checks-Effects-Interactions order already enforced by `create_will`.
 #[cfg(test)]
-mod audit_protocol_stats_test;
+mod issue_51_test;
+/// Regression tests for issue #52: `clone_will` now deep-copies hashed
+/// beneficiary slots from the source will (resetting claimed flags) instead of
+/// dropping them, so the cloned will's visible + hashed basis points continue
+/// to satisfy the 10,000 bps invariant.
 #[cfg(test)]
-mod renounce_validation_test;
-#[cfg(test)]
-mod set_delegate_test;
-#[cfg(test)]
-mod split_will_test;
+mod issue_52_test;
 #[cfg(test)]
 /// Regression tests for issues #57, #58, #59, and #60: mixed visible/hashed
 /// percentage beneficiaries, split_will rejection on hashed-beneficiary wills,
@@ -395,7 +395,15 @@ mod split_will_test;
 /// check_resource_costs.sh graceful handling of the disabled profile module.
 mod issue_57_58_59_60_test;
 #[cfg(test)]
-mod issue_490_493_test;
+mod migrate_will_test;
+#[cfg(test)]
+mod protocol_stats_test;
+#[cfg(test)]
+mod renounce_validation_test;
+#[cfg(test)]
+mod set_delegate_test;
+#[cfg(test)]
+mod split_will_test;
 
 /// Comprehensive negative authorization tests asserting that every entry point
 /// rejects unauthorized callers with the exact declared WillError code.
@@ -416,25 +424,25 @@ mod state_machine_test;
 // removed contract functionality, which is out of scope for a merge-damage
 // cleanup — left disconnected until someone decides what to do with it.
 #[cfg(test)]
-// mod uncovered_entrypoints_test; // TODO: ContractEvents API
-#[cfg(test)]
-mod update_will_settings_test;
-#[cfg(test)]
-mod wills_by_owner_status_test;
-// #[cfg(test)]
-// mod issue_486_489_test; // TODO: ContractEvents API
-#[cfg(test)]
 mod issue_10_test;
 #[cfg(test)]
 mod issue_11_test;
 #[cfg(test)]
 mod issue_12_test;
 #[cfg(test)]
+mod issue_486_489_test;
+#[cfg(test)]
 mod issue_9_test;
+#[cfg(test)]
+mod uncovered_entrypoints_test;
+#[cfg(test)]
+mod update_will_settings_test;
+#[cfg(test)]
+mod wills_by_owner_status_test;
 
 use soroban_sdk::{
-    contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address,
-    Bytes, Env, Map, Vec,
+    contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address, Bytes,
+    Env, Map, Vec,
 };
 
 pub use errors::WillError;
@@ -951,7 +959,11 @@ impl WillContract {
             &owner,
             token_count,
             &will.beneficiaries,
-            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, checkin_period_days)),
+            checked_add_timestamp(
+                &env,
+                now,
+                checked_days_to_seconds(&env, checkin_period_days),
+            ),
         );
 
         will_id
@@ -1011,7 +1023,12 @@ impl WillContract {
         if will.beneficiaries.is_empty() || will.beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
-        assert_valid_allocations(&env, &will.beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
+        assert_valid_allocations(
+            &env,
+            &will.beneficiaries,
+            &will.hashed_beneficiaries,
+            total_balance(&will.balances),
+        );
         assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
         will.status = WillStatus::Active;
@@ -1144,7 +1161,11 @@ impl WillContract {
 
         let now = env.ledger().timestamp();
         will.last_checkin = now;
-        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
+        let next_deadline = checked_add_timestamp(
+            &env,
+            now,
+            checked_days_to_seconds(&env, will.checkin_period_days),
+        );
         storage::save_will(&env, &will);
         storage::bump_instance_ttl(&env);
 
@@ -1265,7 +1286,11 @@ impl WillContract {
             assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
             will.last_checkin = now;
-            let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
+            let next_deadline = checked_add_timestamp(
+                &env,
+                now,
+                checked_days_to_seconds(&env, will.checkin_period_days),
+            );
             storage::save_will(&env, &will);
 
             // Same per-will audit entry as the single-will `check_in` path,
@@ -1319,7 +1344,11 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         let now = env.ledger().timestamp();
-        let deadline = checked_add_timestamp(&env, will.last_checkin, checked_days_to_seconds(&env, will.checkin_period_days));
+        let deadline = checked_add_timestamp(
+            &env,
+            will.last_checkin,
+            checked_days_to_seconds(&env, will.checkin_period_days),
+        );
         if now < deadline {
             panic_with_error!(&env, WillError::CheckinNotDue);
         }
@@ -1388,7 +1417,7 @@ impl WillContract {
         // `assert_status(.., Triggered, ..)` above doesn't already guarantee
         // (a `Triggered` will always has `trigger_time` set).
         let now = env.ledger().timestamp();
-        if now >= grace_deadline(&env, &will) {
+        if now > grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
@@ -1417,7 +1446,11 @@ impl WillContract {
             symbol_short!("emerg"),
         );
 
-        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
+        let next_deadline = checked_add_timestamp(
+            &env,
+            now,
+            checked_days_to_seconds(&env, will.checkin_period_days),
+        );
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
         storage::bump_instance_ttl(&env);
     }
@@ -1517,7 +1550,7 @@ impl WillContract {
         // call below) conditional on the grace period *not yet* having
         // expired, the exact opposite of this function's purpose.
         let now = env.ledger().timestamp();
-        if now < grace_deadline(&env, &will) {
+        if now <= grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -1704,7 +1737,12 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         assert_beneficiary_count(&env, &beneficiaries);
-        assert_valid_allocations(&env, &beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
+        assert_valid_allocations(
+            &env,
+            &beneficiaries,
+            &will.hashed_beneficiaries,
+            total_balance(&will.balances),
+        );
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
@@ -2219,12 +2257,13 @@ impl WillContract {
     ///   [`MAX_PERIOD_DAYS`].
     ///
     /// # Events
-    /// Emits [`events::periods_updated`] whose `next_deadline` field is
-    /// `now + checkin_period_days * SECONDS_PER_DAY`, where `now` is the
-    /// timestamp at which this call executes. Because the owner must sign this
-    /// transaction, `update_periods` resets `last_checkin` to `now` so that
-    /// reducing the period can never retroactively expire the will and make it
-    /// immediately triggerable by a keeper (#15).
+    /// Emits [`events::periods_updated`] whose `next_deadline` field is the
+    /// deadline [`Self::trigger_will`] actually enforces, namely
+    /// `last_checkin + checkin_period_days * SECONDS_PER_DAY`. This function
+    /// never touches `last_checkin`, so that value is independent of when the
+    /// owner happens to call: an indexer that schedules reminders from the event
+    /// stays in sync with the on-chain rule instead of drifting later by however
+    /// long it has been since the last check-in (#357).
     pub fn update_periods(
         env: Env,
         will_id: u64,
@@ -2235,8 +2274,6 @@ impl WillContract {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
-
-        let now = env.ledger().timestamp();
 
         // Update checkin period if provided
         if let Some(new_checkin) = checkin_period_days {
@@ -2256,11 +2293,15 @@ impl WillContract {
             will.grace_period_days = new_grace;
         }
 
-        // Reset last_checkin to now so the new periods apply from this moment,
-        // preventing retroactive expiration if the owner reduces the period below
-        // the already elapsed time (#15).
-        will.last_checkin = now;
-        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
+        // `trigger_will` derives the deadline from `last_checkin`, which this call
+        // leaves untouched, so the event must carry that same value rather than
+        // `now + period` — otherwise the published deadline is later than the
+        // enforced one by the age of the current check-in (#357).
+        let next_deadline = checked_add_timestamp(
+            &env,
+            will.last_checkin,
+            checked_days_to_seconds(&env, will.checkin_period_days),
+        );
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2328,7 +2369,12 @@ impl WillContract {
         // Update beneficiaries if provided
         if let Some(new_beneficiaries) = beneficiaries {
             assert_beneficiary_count(&env, &new_beneficiaries);
-            assert_valid_allocations(&env, &new_beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
+            assert_valid_allocations(
+                &env,
+                &new_beneficiaries,
+                &will.hashed_beneficiaries,
+                total_balance(&will.balances),
+            );
             if new_beneficiaries.is_empty() || new_beneficiaries.len() > MAX_BENEFICIARIES {
                 panic_with_error!(&env, WillError::TooManyBeneficiaries);
             }
@@ -2590,7 +2636,8 @@ impl WillContract {
 
         match will.status {
             WillStatus::Active => {
-                let deadline = checked_deadline_as_i64(&env, will.last_checkin, will.checkin_period_days);
+                let deadline =
+                    checked_deadline_as_i64(&env, will.last_checkin, will.checkin_period_days);
                 Some(deadline - now)
             }
             WillStatus::Triggered => {
@@ -3119,7 +3166,8 @@ impl WillContract {
         // Enforce guardian-list cooldown.
         let now = env.ledger().timestamp();
         let cooldown_seconds = checked_days_to_seconds(&env, GUARDIAN_COOLDOWN_DAYS);
-        let cooldown_ends = checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
+        let cooldown_ends =
+            checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
         if now < cooldown_ends {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
@@ -3242,14 +3290,19 @@ impl WillContract {
         // restart the check-in clock (#373) -- same rule `emergency_checkin`
         // enforces, so a guardian quorum and the owner are held to one deadline.
         let trigger_time = will.trigger_time.unwrap_or(0);
-        let grace_deadline = checked_add_timestamp(&env, trigger_time, checked_days_to_seconds(&env, will.grace_period_days));
-        if now >= grace_deadline {
+        let grace_deadline = checked_add_timestamp(
+            &env,
+            trigger_time,
+            checked_days_to_seconds(&env, will.grace_period_days),
+        );
+        if now > grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
         // Enforce guardian-list cooldown (same rule as guardian_trigger).
         let cooldown_seconds = checked_days_to_seconds(&env, GUARDIAN_COOLDOWN_DAYS);
-        let cooldown_ends = checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
+        let cooldown_ends =
+            checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
         if now < cooldown_ends {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
@@ -3325,7 +3378,11 @@ impl WillContract {
                 symbol_short!("gcancel"),
             );
 
-            let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
+            let next_deadline = checked_add_timestamp(
+                &env,
+                now,
+                checked_days_to_seconds(&env, will.checkin_period_days),
+            );
             events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
         }
     }
@@ -3579,6 +3636,21 @@ impl WillContract {
             balances.set(token_addr, prev + amount);
         }
 
+        // Deep-copy hashed beneficiaries from the source, resetting each
+        // `claimed` flag so the cloned will's commitments are fresh and
+        // can be independently revealed via `reveal_and_claim` (#52).
+        // Dropping hashed_beneficiaries and keeping only the visible
+        // beneficiaries would violate the 10,000 bps invariant whenever
+        // the source reserved some basis points for hashed slots.
+        let mut cloned_hashed: Vec<HashedBeneficiary> = Vec::new(&env);
+        for hb in source.hashed_beneficiaries.iter() {
+            cloned_hashed.push_back(HashedBeneficiary {
+                commitment: hb.commitment.clone(),
+                percentage: hb.percentage,
+                claimed: false,
+            });
+        }
+
         // Re-validate `FixedAmount` beneficiaries against the clone's new
         // balance (#239): funding a clone with less than the original
         // fixed-amount commitments must fail loudly here rather than
@@ -3599,21 +3671,6 @@ impl WillContract {
 
         for beneficiary in source.beneficiaries.iter() {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
-        }
-
-        // Deep-copy hashed beneficiaries from the source, resetting each
-        // `claimed` flag so the cloned will's commitments are fresh and
-        // can be independently revealed via `reveal_and_claim` (#52).
-        // Dropping hashed_beneficiaries and keeping only the visible
-        // beneficiaries would violate the 10,000 bps invariant whenever
-        // the source reserved some basis points for hashed slots.
-        let mut cloned_hashed: Vec<HashedBeneficiary> = Vec::new(&env);
-        for hb in source.hashed_beneficiaries.iter() {
-            cloned_hashed.push_back(HashedBeneficiary {
-                commitment: hb.commitment.clone(),
-                percentage: hb.percentage,
-                claimed: false,
-            });
         }
 
         let will = Will {
@@ -3668,7 +3725,11 @@ impl WillContract {
             &owner,
             token_count,
             &will.beneficiaries,
-            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, source.checkin_period_days)),
+            checked_add_timestamp(
+                &env,
+                now,
+                checked_days_to_seconds(&env, source.checkin_period_days),
+            ),
         );
         events::will_cloned(&env, source_will_id, will_id, &owner);
 
@@ -3857,7 +3918,11 @@ impl WillContract {
                 &owner,
                 token_count,
                 &will.beneficiaries,
-                checked_add_timestamp(&env, now, checked_days_to_seconds(&env, checkin_period_days)),
+                checked_add_timestamp(
+                    &env,
+                    now,
+                    checked_days_to_seconds(&env, checkin_period_days),
+                ),
             );
 
             ids.push_back(will_id);
@@ -3972,8 +4037,8 @@ impl WillContract {
         // authorized caller. Checking the pair first means a caller who owns
         // only one of the two ids learns nothing about the other will beyond
         // "not yours", and can never fold their will into someone else's.
-        let mut will_a = load_will(&env, will_id_a);
-        let mut will_b = load_will(&env, will_id_b);
+        let will_a = load_will(&env, will_id_a);
+        let will_b = load_will(&env, will_id_b);
         if will_a.owner != will_b.owner {
             panic_with_error!(&env, WillError::NotSameOwner);
         }
@@ -4371,13 +4436,7 @@ impl WillContract {
         };
         storage::archive_will(&env, &will);
 
-        events::will_archived(
-            &env,
-            will_id,
-            &will.owner,
-            env.ledger().timestamp(),
-            reason,
-        );
+        events::will_archived(&env, will_id, &will.owner, env.ledger().timestamp(), reason);
     }
 
     /// Returns the archived will record for `will_id`.
@@ -4537,7 +4596,10 @@ impl WillContract {
         // helper (#44). The `DuplicateBeneficiary` error code (rather than
         // `InvalidSplit`) makes sense here: the caller supplied an invalid
         // beneficiary list, same as in `create_will`.
-        split_uniqueness_check::assert_no_duplicate_beneficiary_addresses(&env, &beneficiaries_to_split);
+        split_uniqueness_check::assert_no_duplicate_beneficiary_addresses(
+            &env,
+            &beneficiaries_to_split,
+        );
 
         // Verify every address in beneficiaries_to_split actually exists on
         // the source will before attempting the split.
@@ -4692,7 +4754,11 @@ impl WillContract {
             &owner,
             child_token_count,
             &normalised_split,
-            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, source.checkin_period_days)),
+            checked_add_timestamp(
+                &env,
+                now,
+                checked_days_to_seconds(&env, source.checkin_period_days),
+            ),
         );
 
         new_id
@@ -4890,7 +4956,7 @@ impl WillContract {
             WillError::WillNotReleased,
         );
 
-        if env.ledger().timestamp() < grace_deadline(&env, &will) {
+        if env.ledger().timestamp() <= grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -5028,6 +5094,7 @@ impl WillContract {
 /// A `Triggered` will always has a `trigger_time`; a missing one is treated
 /// as "not triggered" rather than defaulting to `0`, which would make the
 /// deadline already elapsed and let funds be released immediately (#442).
+#[allow(dead_code)]
 fn grace_period_end(env: &Env, will: &Will) -> u64 {
     let trigger_time = match will.trigger_time {
         Some(t) => t,
@@ -5231,7 +5298,7 @@ fn assert_valid_allocations(
         total_checked_add(&mut percentage_total, hb.percentage, env);
     }
 
-    if has_percentage && percentage_total != 10_000 {
+    if has_percentage && percentage_total > 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
     }
     // A FixedAmount-only list is deliberately allowed to leave a portion of
@@ -5507,7 +5574,6 @@ fn primary_token_balance(balances: &Map<Address, i128>, primary_token: &Address)
     balances.get(primary_token.clone()).unwrap_or(0)
 }
 
-
 /// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
 /// repeated address. Also validates that the owner is not in the guardian list.
 ///
@@ -5613,7 +5679,8 @@ fn checked_add_timestamp(env: &Env, base: u64, offset: u64) -> u64 {
 fn checked_deadline_as_i64(env: &Env, base: u64, days: u64) -> i64 {
     let offset = checked_days_to_seconds(env, days);
     let deadline_u64 = checked_add_timestamp(env, base, offset);
-    deadline_u64.try_into()
+    deadline_u64
+        .try_into()
         .unwrap_or_else(|_| panic_with_error!(env, WillError::ArithmeticOverflow))
 }
 
@@ -5882,16 +5949,17 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             continue;
         }
 
-        // Deduct the keeper bounty only from the token it was computed from.
-        // Comparing the address (rather than relying on iteration position)
-        // keeps the deduction and the payout tied to the same token (#378).
+        // Deduct the keeper bounty from this token's balance *before*
+        // beneficiary shares are computed; paying it on top of a full
+        // distribution would spend funds belonging to other wills held by
+        // this contract (#458). `bounty_plan` is the single source of truth
+        // for both this deduction and the payout below, so the two can never
+        // desynchronise (#378/#109).
         let mut token_bounty: i128 = 0;
         let mut available = total;
-        if let Some((bounty_addr, bounty_amount)) = &bounty_token {
-            if bounty_addr == &token_addr {
-                token_bounty = *bounty_amount;
-                available = (total - token_bounty).max(0);
-            }
+        if let Some(bounty_amount) = bounty_plan.get(token_addr.clone()) {
+            token_bounty = bounty_amount;
+            available = (total - token_bounty).max(0);
         }
 
         // The reserve for still-unclaimed hashed beneficiaries is withheld
@@ -5900,9 +5968,8 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         // conservation check below must count it separately or every release
         // of a will with an unclaimed hashed beneficiary would abort with
         // `DistributionMismatch` (#57).
-        let mut hashed_reserve: i128 = 0;
         if hashed_bps > 0 {
-            hashed_reserve = proportional_share(available, hashed_bps);
+            let hashed_reserve = proportional_share(available, hashed_bps);
             available -= hashed_reserve;
             hashed_reserves.set(token_addr.clone(), hashed_reserve);
         }
@@ -5986,12 +6053,6 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         // draw from, so the full token balance is preserved across all paths.
         let local_hashed_reserve = hashed_reserves.get(token_addr.clone()).unwrap_or(0);
         let mut planned: i128 = token_bounty;
-        if let Some(reserve) = hashed_reserves.get(token_addr.clone()) {
-            planned = match planned.checked_add(reserve) {
-                Some(v) => v,
-                None => panic_with_error!(env, WillError::DistributionMismatch),
-            };
-        }
         for (_, share) in shares.iter() {
             if share < 0 {
                 panic_with_error!(env, WillError::DistributionMismatch);

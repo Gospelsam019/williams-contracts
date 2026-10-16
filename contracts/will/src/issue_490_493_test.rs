@@ -283,7 +283,8 @@ fn release_refuses_over_cap_stored_will() {
 
     // Simulate a will stored under an older layout with too many entries.
     let mut will = ctx.client.get_will(&id);
-    will.beneficiaries.push_back(pct(&Address::generate(env), 1));
+    will.beneficiaries
+        .push_back(pct(&Address::generate(env), 1));
     env.as_contract(&ctx.contract_id, || {
         crate::storage::save_will(env, &will);
     });
@@ -323,10 +324,18 @@ fn owner_pagination_cursor_survives_additions_and_deletions() {
     let w5 = create_simple(&ctx, &b);
 
     let page2 = owner_page(&ctx, Some(cursor), 2);
-    assert_eq!(page2, vec![env, w3, w4], "stale cursor must not skip or repeat");
+    assert_eq!(
+        page2,
+        vec![env, w3, w4],
+        "stale cursor must not skip or repeat"
+    );
 
     let page3 = owner_page(&ctx, Some(w4), 2);
-    assert_eq!(page3, vec![env, w5], "newly added will appears on a later page");
+    assert_eq!(
+        page3,
+        vec![env, w5],
+        "newly added will appears on a later page"
+    );
 
     let page4 = owner_page(&ctx, Some(w5), 2);
     assert_eq!(page4.len(), 0, "cursor at the last id yields an empty page");

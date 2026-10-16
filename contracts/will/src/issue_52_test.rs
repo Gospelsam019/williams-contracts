@@ -65,7 +65,14 @@ fn setup_will_with_hashed_beneficiary() -> (Env, Address, Address, Address, u64,
     let commitment = Bytes::from_array(&env, &commitment_hash.to_array());
     client.add_hashed_beneficiary(&source_id, &owner, &commitment, &5_000);
 
-    (env, contract_id, owner, token_address, source_id, commitment)
+    (
+        env,
+        contract_id,
+        owner,
+        token_address,
+        source_id,
+        commitment,
+    )
 }
 
 #[test]

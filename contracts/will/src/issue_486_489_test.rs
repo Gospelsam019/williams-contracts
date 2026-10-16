@@ -14,14 +14,15 @@
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, Symbol, TryIntoVal, Vec,
+    vec, Address, Env, Vec,
 };
 
+use crate::event_test_support as ev;
+
 use crate::{
-    Allocation, Beneficiary, GuardianSpec, WillContract, WillContractClient, WillError,
-    WillStatus,
+    Allocation, Beneficiary, GuardianSpec, WillContract, WillContractClient, WillError, WillStatus,
 };
 
 const DAY: u64 = 86_400;
@@ -116,26 +117,24 @@ fn pct_total(list: &Vec<Beneficiary>) -> u32 {
 /// Returns the data tuple of the `renounce` event for `will_id`. Must be
 /// called immediately after `renounce_beneficiary`, before any other
 /// contract call.
-fn renounce_event(
-    ctx: &Ctx,
-    will_id: u64,
-) -> (Address, Address, Vec<Beneficiary>, Option<u64>) {
-    let target: Symbol = symbol_short!("renounce");
-    for (emitter, topics, data) in ctx.env.events().all().iter() {
-        if emitter != ctx.contract_id || topics.len() != 2 {
-            continue;
-        }
-        let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&ctx.env);
-        match t0 {
-            Ok(s) if s == target => {}
-            _ => continue,
-        }
-        let t1: u64 = topics.get(1).unwrap().try_into_val(&ctx.env).unwrap();
-        if t1 == will_id {
-            return data.try_into_val(&ctx.env).unwrap();
-        }
-    }
-    panic!("renounce event not found");
+fn renounce_event(ctx: &Ctx, will_id: u64) -> (Address, Address, Vec<Beneficiary>, Option<u64>) {
+    let event = ev::find_event(
+        &ctx.env,
+        symbol_short!("renounce"),
+        Some(will_id),
+        "renounce",
+    );
+    let data = ev::data_vec(&event).expect("renounce data is a tuple");
+    assert_eq!(
+        data.len(),
+        4,
+        "renounce data must be (who, owner, split, trigger_time)"
+    );
+    let who = ev::address_from(&data[0], &ctx.env).expect("renounce who is an address");
+    let owner = ev::address_from(&data[1], &ctx.env).expect("renounce owner is an address");
+    let split = ev::beneficiary_list_from(&ctx.env, &data[2]).expect("renounce split decodes");
+    let trigger_time = ev::option_u64_from(&data[3]).expect("renounce trigger_time decodes");
+    (who, owner, split, trigger_time)
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +156,13 @@ fn prime_renounced_share_last_recipient_absorbs_overage() {
 
     let will_id = create(
         &ctx,
-        vec![env, pct(&a, 3_001), pct(&b, 3_333), pct(&c, 3_333), pct(&d, 333)],
+        vec![
+            env,
+            pct(&a, 3_001),
+            pct(&b, 3_333),
+            pct(&c, 3_333),
+            pct(&d, 333),
+        ],
         vec![env],
         0,
     );
@@ -194,7 +199,13 @@ fn prime_renounced_shares_never_exceed_cap() {
 
         let will_id = create(
             &ctx,
-            vec![env, pct(&renouncer, *p), pct(&x, r1), pct(&y, r2), pct(&z, r3)],
+            vec![
+                env,
+                pct(&renouncer, *p),
+                pct(&x, r1),
+                pct(&y, r2),
+                pct(&z, r3),
+            ],
             vec![env],
             0,
         );
@@ -209,7 +220,11 @@ fn prime_renounced_shares_never_exceed_cap() {
         let z_floor = r3 + ((*p as u64 * r3 as u64) / rest as u64) as u32;
         let z_new = bp_of(&list, &z);
         assert!(z_new >= z_floor, "last entry under-paid for prime {}", p);
-        assert!(z_new - z_floor <= 2, "last entry over-absorbed for prime {}", p);
+        assert!(
+            z_new - z_floor <= 2,
+            "last entry over-absorbed for prime {}",
+            p
+        );
     }
 }
 
@@ -262,7 +277,12 @@ fn renounce_while_active_emits_no_trigger_time() {
     let a = Address::generate(env);
     let b = Address::generate(env);
 
-    let will_id = create(&ctx, vec![env, pct(&a, 5_000), pct(&b, 5_000)], vec![env], 0);
+    let will_id = create(
+        &ctx,
+        vec![env, pct(&a, 5_000), pct(&b, 5_000)],
+        vec![env],
+        0,
+    );
 
     ctx.client.renounce_beneficiary(&will_id, &a);
     let (who, owner, split, trigger_time) = renounce_event(&ctx, will_id);
@@ -286,7 +306,13 @@ fn renounce_during_grace_period_records_trigger_time_and_payout_matches_event() 
 
     let will_id = create(
         &ctx,
-        vec![env, pct(&a, 7), pct(&b, 3_331), pct(&c, 3_331), pct(&d, 3_331)],
+        vec![
+            env,
+            pct(&a, 7),
+            pct(&b, 3_331),
+            pct(&c, 3_331),
+            pct(&d, 3_331),
+        ],
         vec![env],
         0,
     );
@@ -315,7 +341,11 @@ fn renounce_during_grace_period_records_trigger_time_and_payout_matches_event() 
     assert_eq!(ctx.client.get_will(&will_id).status, WillStatus::Released);
 
     let token = TokenClient::new(env, &ctx.token);
-    assert_eq!(token.balance(&a), 0, "renounced beneficiary must receive nothing");
+    assert_eq!(
+        token.balance(&a),
+        0,
+        "renounced beneficiary must receive nothing"
+    );
 
     let mut paid: i128 = 0;
     for entry in split.iter() {
@@ -386,8 +416,11 @@ fn guardian_update_cannot_wipe_accumulating_cancel_vote() {
     assert_eq!(will.status, WillStatus::Active);
     assert_eq!(will.guardian_cancel_votes, 0);
 
-    ctx.client
-        .update_guardians(&will_id, &ctx.owner, &vec![env, ga.clone(), newcomer.clone()]);
+    ctx.client.update_guardians(
+        &will_id,
+        &ctx.owner,
+        &vec![env, ga.clone(), newcomer.clone()],
+    );
     assert_eq!(ctx.client.get_will(&will_id).guardians.len(), 2);
 }
 
@@ -465,8 +498,12 @@ fn zero_weight_guardian_is_rejected() {
     let will_id = create(&ctx, vec![env, pct(&beneficiary, 10_000)], vec![env], 0);
 
     assert_eq!(
-        ctx.client
-            .try_update_guardians_weighted(&will_id, &ctx.owner, &vec![env, spec(&g1, 0)], &Some(1)),
+        ctx.client.try_update_guardians_weighted(
+            &will_id,
+            &ctx.owner,
+            &vec![env, spec(&g1, 0)],
+            &Some(1)
+        ),
         Err(Ok(WillError::InvalidGuardianThreshold.into()))
     );
     assert_eq!(

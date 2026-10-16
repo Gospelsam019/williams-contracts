@@ -231,8 +231,6 @@ pub struct OwnerStats {
     pub total_locked_by_token: Vec<TokenLockedBalance>,
 }
 
-
-
 /// Reserved: a beneficiary's claimable share in a pull-based distribution.
 ///
 /// **Not used by the contract today.** There is no pull mode, no

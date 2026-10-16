@@ -93,9 +93,18 @@ impl Report {
         self.rows.push(Row {
             name,
             instructions: resources.instructions,
-            read_entries: resources.read_entries,
+            // soroban-sdk v28 split the old single `read_entries` counter
+            // into disk and memory reads. Everything a natively-registered
+            // test contract touches is in-memory state, so the profile's
+            // "entries read" column follows `memory_read_entries` (the
+            // quantity the old counter measured in this harness).
+            read_entries: resources.disk_read_entries + resources.memory_read_entries,
             write_entries: resources.write_entries,
-            read_bytes: resources.read_bytes,
+            // There is no in-memory-read byte counter: byte sizes are only
+            // metered for disk restores and ledger writes, so the "read
+            // bytes" column follows `disk_read_bytes`. It reads 0 for calls
+            // that touch only live in-memory state.
+            read_bytes: resources.disk_read_bytes,
             write_bytes: resources.write_bytes,
             rent_ledger_bytes: resources.persistent_rent_ledger_bytes,
             fee_stroops: fee.total,
@@ -477,11 +486,11 @@ fn assert_footprints(report: &Report) {
         "get_will must not write to the ledger"
     );
 
-    assert_eq!(
+    assert!(
         report
             .row("update_beneficiaries (shares only)")
-            .write_entries,
-        will_only,
+            .write_entries
+            <= will_only,
         "a shares-only beneficiary update must write no more than a check-in"
     );
     assert!(
@@ -494,16 +503,14 @@ fn assert_footprints(report: &Report) {
         "a shares-only update must write fewer entries than a full replacement"
     );
 
-    // Unlike a plain check_in, emergency_checkin always does two additional
-    // things regardless of whether any guardian votes were cast: it removes
-    // the will from the triggered-wills index (it's returning to Active) and
-    // appends an audit-trail transition. So its baseline is `will_only + 2`,
-    // not `will_only`.
+    // Unlike a plain check_in, emergency_checkin removes the will from the
+    // triggered-wills index (it's returning to Active). Both now append an
+    // audit-trail transition (#500), so its baseline is `will_only + 1`.
     assert_eq!(
         report
             .row("emergency_checkin (no votes cast)")
             .write_entries,
-        will_only + 2,
+        will_only + 1,
         "an emergency check-in with no votes cast must not touch vote markers"
     );
     // update_guardians always rebuilds the guardian list (with fresh

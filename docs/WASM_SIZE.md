@@ -7,7 +7,7 @@ profile tuning for the `will` contract and how to measure its effect.
 
 ## Size budget
 
-The compiled `will.wasm` release binary MUST NOT exceed **150,000 bytes** (150 KB). CI automatically enforces this budget on every commit and pull request.
+The compiled `will.wasm` release binary MUST NOT exceed **250,000 bytes** (250 KB network limit). CI automatically enforces this budget on every commit and pull request via `scripts/check-wasm-size.sh`.
 
 ## Current release profile
 

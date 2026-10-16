@@ -229,5 +229,19 @@ pub enum WillError {
     /// `refund_unconfirmed_will` was called before the confirmation deadline
     /// plus grace margin had elapsed (#40).
     ConfirmationWindowNotExpired = 54,
+    /// A timestamp or deadline calculation overflowed `u64`.
+    ///
+    /// `checkin_period_days` and `grace_period_days` are individually bounded
+    /// by `MAX_PERIOD_DAYS` when they are set, but the combination
+    /// `last_checkin + checkin_period_days * SECONDS_PER_DAY` or the
+    /// subsequent `+ grace_period_days * SECONDS_PER_DAY` could still
+    /// overflow in extreme fuzz or adversarial scenarios. All deadline and
+    /// period arithmetic goes through checked helpers that panic with this
+    /// error rather than wrapping silently (#16).
+    ArithmeticOverflow = 55,
+    /// `set_keeper_bounty_token` was called with a token the will does not
+    /// currently hold. The bounty is carved out of a balance the will holds,
+    /// so naming any other token could never pay from it and would silently
+    /// degrade to no bounty at all (#109).
+    InvalidBountyToken = 56,
 }
-

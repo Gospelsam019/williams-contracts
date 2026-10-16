@@ -5,11 +5,13 @@
 //! will state purely from events will silently miss every hashed beneficiary.
 
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    symbol_short,
+    testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Bytes, Env, Vec as SorobanVec,
 };
 
+use crate::event_test_support as ev;
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient};
 
 fn setup<'a>() -> (
@@ -82,10 +84,21 @@ fn add_hashed_beneficiary_emits_event() {
     client.add_hashed_beneficiary(&will_id, &owner, &commitment_bytes, &5_000);
 
     // Verify that an event was emitted
-    let events = env.events().all();
-    assert!(
-        !events.is_empty(),
-        "add_hashed_beneficiary should emit an event"
+    let event = ev::find_event(&env, symbol_short!("hadd"), Some(will_id), "hadd");
+    // Payload order matches `events::hashed_beneficiary_added`:
+    // (owner, commitment, percentage).
+    let data = ev::data_vec(&event).expect("hadd data is a tuple");
+    assert_eq!(
+        data.len(),
+        3,
+        "hadd data must be (owner, commitment, percentage)"
+    );
+    let event_owner = ev::address_from(&data[0], &env).expect("hadd owner is an address");
+    assert_eq!(event_owner, owner, "hadd event must carry the will's owner");
+    assert_eq!(
+        ev::u32_from(&data[2]),
+        Some(5_000),
+        "hadd event must carry the reserved basis points"
     );
 
     // Verify the will now contains the hashed beneficiary

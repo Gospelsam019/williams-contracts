@@ -1200,3 +1200,237 @@ pub fn run_split_will(input: &SplitWillInput) -> Outcome {
 
     Outcome::Accepted(child_id)
 }
+
+// ---------------------------------------------------------------------------
+// multi_token_distribution runner (Issue #27)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub enum MixedAllocationSpec {
+    Percentage(u32),
+    FixedAmount(i128),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct MixedBeneficiarySpec {
+    pub address_slot: u8,
+    pub allocation: MixedAllocationSpec,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub struct MultiTokenDistributionInput {
+    /// Token balances to lock (amount per token)
+    pub token_amounts: Vec<i128>,
+    /// Beneficiaries with mixed allocations
+    pub beneficiaries: Vec<MixedBeneficiarySpec>,
+    /// Keeper bounty in basis points (0..=1000)
+    pub keeper_bounty_bps: u32,
+    /// Targeted token index for keeper bounty (if any)
+    pub target_bounty_token_idx: Option<u8>,
+}
+
+pub fn run_multi_token_distribution(input: &MultiTokenDistributionInput) -> Outcome {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(BASE_TIMESTAMP);
+
+    let pool = address_pool(&env);
+    let owner = pool.get(0).unwrap();
+    let keeper = Address::generate(&env);
+
+    // Filter token amounts to 1..=3 valid amounts (positive, <= MAX_MINT)
+    let mut valid_amounts: Vec<i128> = input
+        .token_amounts
+        .iter()
+        .filter_map(|&a| {
+            let clamped = a.clamp(1, MAX_MINT);
+            if clamped > 0 {
+                Some(clamped)
+            } else {
+                None
+            }
+        })
+        .take(3)
+        .collect();
+
+    if valid_amounts.is_empty() {
+        valid_amounts.push(1_000_000);
+    }
+
+    // Register tokens and mint to owner
+    let mut token_addresses: Vec<Address> = Vec::new();
+    let mut tokens_to_lock: SorobanVec<(Address, i128)> = SorobanVec::new(&env);
+    for &amount in valid_amounts.iter() {
+        let sac = env.register_stellar_asset_contract_v2(owner.clone());
+        let addr = sac.address();
+        StellarAssetClient::new(&env, &addr).mint(&owner, &amount);
+        token_addresses.push(addr.clone());
+        tokens_to_lock.push_back((addr, amount));
+    }
+
+    // Sanitize beneficiaries: ensure distinct addresses and valid allocation sum
+    let mut seen_slots: Vec<u8> = Vec::new();
+    let mut sanitized_bens: Vec<Beneficiary> = Vec::new();
+    let mut fixed_sum: i128 = 0;
+    let min_balance = *valid_amounts.iter().min().unwrap();
+
+    for b in input.beneficiaries.iter() {
+        let slot_idx = b.address_slot % ADDRESS_POOL_SIZE;
+        // Exclude owner (slot 0)
+        if slot_idx == 0 || seen_slots.contains(&slot_idx) {
+            continue;
+        }
+        seen_slots.push(slot_idx);
+        let addr = slot(&pool, slot_idx);
+
+        match b.allocation {
+            MixedAllocationSpec::FixedAmount(amt) => {
+                let fixed = amt.clamp(1, (min_balance / 4).max(1));
+                if fixed_sum.saturating_add(fixed) < min_balance {
+                    fixed_sum += fixed;
+                    sanitized_bens.push(Beneficiary {
+                        address: addr,
+                        allocation: Allocation::FixedAmount(fixed),
+                    });
+                }
+            }
+            MixedAllocationSpec::Percentage(_) => {
+                sanitized_bens.push(Beneficiary {
+                    address: addr,
+                    allocation: Allocation::Percentage(0),
+                });
+            }
+        }
+        if sanitized_bens.len() >= MAX_BENEFICIARIES as usize {
+            break;
+        }
+    }
+
+    if sanitized_bens.is_empty() {
+        sanitized_bens.push(Beneficiary {
+            address: slot(&pool, 1),
+            allocation: Allocation::Percentage(10_000),
+        });
+    }
+
+    // Allocate remaining percentage basis points across percentage beneficiaries
+    let pct_indices: Vec<usize> = sanitized_bens
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| match b.allocation {
+            Allocation::Percentage(_) => Some(i),
+            _ => None,
+        })
+        .collect();
+
+    if !pct_indices.is_empty() {
+        let count = pct_indices.len();
+        let each = 10_000 / count as u32;
+        let remainder = 10_000 - each * count as u32;
+        for (idx, &i) in pct_indices.iter().enumerate() {
+            let bps = if idx == 0 { each + remainder } else { each };
+            sanitized_bens[i].allocation = Allocation::Percentage(bps);
+        }
+    }
+
+    let mut soroban_bens: SorobanVec<Beneficiary> = SorobanVec::new(&env);
+    for b in sanitized_bens.iter() {
+        soroban_bens.push_back(b.clone());
+    }
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let bounty_bps = input.keeper_bounty_bps % 1001; // 0..=1000 (up to 10%)
+    let guardian_slots: SorobanVec<Address> = SorobanVec::new(&env);
+
+    let will_id_res = client.try_create_will(
+        &owner,
+        &tokens_to_lock,
+        &soroban_bens,
+        &90,
+        &7,
+        &guardian_slots,
+        &2,
+        &Some(bounty_bps),
+        &0,
+    );
+
+    let will_id = match will_id_res {
+        Ok(Ok(id)) => id,
+        Ok(Err(_)) => violation(input, "create_will returned undecodable value"),
+        Err(Ok(_)) => return Outcome::Rejected,
+        Err(Err(e)) => violation(input, &std::format!("create_will aborted: {e:?}")),
+    };
+
+    if let Some(target_idx) = input.target_bounty_token_idx {
+        let idx = target_idx as usize % token_addresses.len();
+        let target_tok = token_addresses[idx].clone();
+        let _ = client.try_set_keeper_bounty_token(&will_id, &owner, &Some(target_tok));
+    }
+
+    // Advance past check-in deadline
+    env.ledger()
+        .set_timestamp(BASE_TIMESTAMP + 91 * SECONDS_PER_DAY);
+    let trigger_res = client.try_trigger_will(&will_id);
+    match trigger_res {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => violation(input, "trigger_will returned undecodable value"),
+        Err(Ok(_)) => return Outcome::Rejected,
+        Err(Err(e)) => violation(input, &std::format!("trigger_will aborted: {e:?}")),
+    }
+
+    // Advance past grace deadline
+    env.ledger()
+        .set_timestamp(BASE_TIMESTAMP + 99 * SECONDS_PER_DAY);
+    let release_res = client.try_release_inheritance(&will_id, &Some(keeper.clone()));
+    match release_res {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => violation(input, "release_inheritance returned undecodable value"),
+        Err(Ok(_)) => return Outcome::Rejected,
+        Err(Err(e)) => violation(input, &std::format!("release_inheritance aborted: {e:?}")),
+    }
+
+    // --- CONSERVATION INVARIANT CHECK ---
+    for (i, token_addr) in token_addresses.iter().enumerate() {
+        let token_client = TokenClient::new(&env, token_addr);
+        let original_amount = valid_amounts[i];
+
+        // 1. Contract holds 0 dust
+        check(
+            token_client.balance(&contract_id) == 0,
+            input,
+            "contract balance is not zero after release (dust was stranded)",
+        );
+
+        // 2. Total received by all parties (beneficiaries + keeper + owner refund) equals original amount
+        let mut sum_beneficiaries: i128 = 0;
+        for b in sanitized_bens.iter() {
+            let bal = token_client.balance(&b.address);
+            check(bal >= 0, input, "beneficiary received negative payout");
+            sum_beneficiaries += bal;
+        }
+
+        let keeper_received = token_client.balance(&keeper);
+        check(
+            keeper_received >= 0,
+            input,
+            "keeper received negative bounty",
+        );
+
+        let owner_refund = token_client.balance(&owner);
+        check(owner_refund >= 0, input, "owner received negative refund");
+
+        let total_distributed = sum_beneficiaries + keeper_received + owner_refund;
+        check(
+            total_distributed == original_amount,
+            input,
+            "token balance conservation violated: total distributed != original amount",
+        );
+    }
+
+    Outcome::Accepted(will_id)
+}

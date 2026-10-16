@@ -240,8 +240,7 @@ fn split_will_inherits_source_guardian_cooldown_timestamp() {
     let child = client.get_will(&child_id);
     // Unmodified guardian list on child inherits the source timestamp, not `now`
     assert_eq!(
-        child.guardian_list_updated_at,
-        created_at,
+        child.guardian_list_updated_at, created_at,
         "child will must inherit source guardian_list_updated_at when guardian list is unmodified"
     );
 
@@ -257,4 +256,3 @@ fn split_will_inherits_source_guardian_cooldown_timestamp() {
     let child_after = client.get_will(&child_id);
     assert_eq!(child_after.status, crate::WillStatus::Released);
 }
-

@@ -77,7 +77,11 @@ fn check_in_appends_a_sequenced_history_entry() {
     let will_id = create_basic_will(&env, &client, &owner, &token_address);
 
     let before = client.get_will_history(&will_id);
-    assert_eq!(before.len(), 1, "create_will records its own initial self-transition");
+    assert_eq!(
+        before.len(),
+        1,
+        "create_will records its own initial self-transition"
+    );
     assert_eq!(before.get(0).unwrap().seq, 1);
 
     client.check_in(&will_id, &owner);
@@ -162,7 +166,7 @@ fn history_trimming_leaves_a_detectable_gap_in_seq_never_a_duplicate() {
     let history = client.get_will_history(&will_id);
     assert_eq!(
         history.len(),
-        MAX_HISTORY_ENTRIES as u32,
+        MAX_HISTORY_ENTRIES,
         "the retained trail is capped even though far more entries were appended"
     );
 

@@ -138,7 +138,10 @@ fn test_discrete_storage_keys_and_constant_gas_across_50_tokens() {
 
         // Verify discrete persistent key has value
         assert_eq!(get_total_locked(&env, token_0), 1_000);
-        assert!(env.storage().persistent().has(&DataKey::TotalLocked(token_0.clone())));
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::TotalLocked(token_0.clone())));
 
         // Profile CPU cost of updating an existing token when N = 1
         env.budget().reset_default();
@@ -146,14 +149,20 @@ fn test_discrete_storage_keys_and_constant_gas_across_50_tokens() {
         storage::adjust_locked_value(&env, token_0, 500);
         let cpu_after_1 = env.budget().cpu_instruction_cost();
         let cost_at_1 = cpu_after_1 - cpu_before_1;
-        assert!(cost_at_1 < 100_000, "Cost at N=1 must be well within transaction budget: {cost_at_1}");
+        assert!(
+            cost_at_1 < 100_000,
+            "Cost at N=1 must be well within transaction budget: {cost_at_1}"
+        );
 
         assert_eq!(get_total_locked(&env, token_0), 1_500);
 
         // 2. Add 49 other distinct tokens to the protocol state (total 50 tokens)
         for t in tokens.iter().skip(1) {
             storage::adjust_locked_value(&env, t, 10_000);
-            assert!(env.storage().persistent().has(&DataKey::TotalLocked(t.clone())));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&DataKey::TotalLocked(t.clone())));
         }
 
         // Verify get_protocol_stats reflects all 50 tokens
@@ -181,16 +190,28 @@ fn test_discrete_storage_keys_and_constant_gas_across_50_tokens() {
         let cost_last = cpu_after_last - cpu_before_last;
 
         // Balance updates across 50 distinct tokens must be bounded and independent of token position
-        assert!(cost_first < 100_000, "Cost must be well within transaction budget: {cost_first}");
-        assert!(cost_middle < 100_000, "Cost must be well within transaction budget: {cost_middle}");
-        assert!(cost_last < 100_000, "Cost must be well within transaction budget: {cost_last}");
+        assert!(
+            cost_first < 100_000,
+            "Cost must be well within transaction budget: {cost_first}"
+        );
+        assert!(
+            cost_middle < 100_000,
+            "Cost must be well within transaction budget: {cost_middle}"
+        );
+        assert!(
+            cost_last < 100_000,
+            "Cost must be well within transaction budget: {cost_last}"
+        );
 
         assert_eq!(get_total_locked(&env, token_0), 2_000);
 
         // 3. Decrementing balance to 0 removes the discrete storage entry
         storage::adjust_locked_value(&env, token_0, -2_000);
         assert_eq!(get_total_locked(&env, token_0), 0);
-        assert!(!env.storage().persistent().has(&DataKey::TotalLocked(token_0.clone())));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::TotalLocked(token_0.clone())));
 
         let stats_after_zero = storage::get_protocol_stats(&env);
         assert_eq!(stats_after_zero.total_locked_by_token.len(), 49);

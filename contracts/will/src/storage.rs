@@ -78,6 +78,7 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// transformation in `WillContract::migrate_will`; a bump on its own would
 /// make `migrate_will` no-op on every will and the version stamp would stop
 /// meaning anything (#367).
+#[allow(dead_code)]
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 #[contracttype]
@@ -173,7 +174,11 @@ pub fn get_total_locked(env: &Env, token: &Address) -> i128 {
         val
     } else if let Some(val) = env.storage().instance().get(&key) {
         val
-    } else if let Some(stats) = env.storage().instance().get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+    } else if let Some(stats) = env
+        .storage()
+        .instance()
+        .get::<_, ProtocolStats>(&DataKey::ProtocolStats)
+    {
         for entry in stats.total_locked_by_token.iter() {
             if entry.token == *token {
                 return entry.total_locked;
@@ -202,7 +207,11 @@ pub fn set_total_locked(env: &Env, token: &Address, amount: i128) {
 pub fn get_protocol_tokens(env: &Env) -> Vec<Address> {
     if let Some(tokens) = env.storage().instance().get(&DataKey::ProtocolTokens) {
         tokens
-    } else if let Some(stats) = env.storage().instance().get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+    } else if let Some(stats) = env
+        .storage()
+        .instance()
+        .get::<_, ProtocolStats>(&DataKey::ProtocolStats)
+    {
         let mut tokens = Vec::new(env);
         for entry in stats.total_locked_by_token.iter() {
             tokens.push_back(entry.token);
@@ -217,7 +226,11 @@ pub fn get_protocol_tokens(env: &Env) -> Vec<Address> {
 pub fn get_active_will_count(env: &Env) -> u64 {
     if let Some(count) = env.storage().instance().get(&DataKey::ActiveWillCount) {
         count
-    } else if let Some(stats) = env.storage().instance().get::<_, ProtocolStats>(&DataKey::ProtocolStats) {
+    } else if let Some(stats) = env
+        .storage()
+        .instance()
+        .get::<_, ProtocolStats>(&DataKey::ProtocolStats)
+    {
         stats.active_will_count
     } else {
         0
@@ -226,7 +239,9 @@ pub fn get_active_will_count(env: &Env) -> u64 {
 
 /// Sets the current active will count.
 pub fn set_active_will_count(env: &Env, count: u64) {
-    env.storage().instance().set(&DataKey::ActiveWillCount, &count);
+    env.storage()
+        .instance()
+        .set(&DataKey::ActiveWillCount, &count);
 }
 
 /// Loads the current protocol statistics from instance and persistent storage.
@@ -257,8 +272,12 @@ pub fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     set_active_will_count(env, stats.active_will_count);
     let old_tokens = get_protocol_tokens(env);
     for token in old_tokens.iter() {
-        env.storage().persistent().remove(&DataKey::TotalLocked(token.clone()));
-        env.storage().instance().remove(&DataKey::TotalLocked(token));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TotalLocked(token.clone()));
+        env.storage()
+            .instance()
+            .remove(&DataKey::TotalLocked(token));
     }
     let mut tokens = Vec::new(env);
     for entry in stats.total_locked_by_token.iter() {
@@ -267,7 +286,9 @@ pub fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
             set_total_locked(env, &entry.token, entry.total_locked);
         }
     }
-    env.storage().instance().set(&DataKey::ProtocolTokens, &tokens);
+    env.storage()
+        .instance()
+        .set(&DataKey::ProtocolTokens, &tokens);
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
 }
 
@@ -307,7 +328,9 @@ pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
             let mut tokens = get_protocol_tokens(env);
             if !tokens.contains(token.clone()) {
                 tokens.push_back(token.clone());
-                env.storage().instance().set(&DataKey::ProtocolTokens, &tokens);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::ProtocolTokens, &tokens);
             }
         }
     } else {
@@ -319,7 +342,9 @@ pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
                 updated.push_back(t);
             }
         }
-        env.storage().instance().set(&DataKey::ProtocolTokens, &updated);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProtocolTokens, &updated);
     }
 }
 

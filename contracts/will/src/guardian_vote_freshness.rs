@@ -17,6 +17,7 @@ use crate::{storage, types::Will};
 
 /// Number of seconds in a day, used to keep the grace period and the ledger
 /// timestamp in the same unit (seconds) when computing vote expiry.
+#[allow(dead_code)]
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Normalises a ledger timestamp to the 1-second granularity that guardian
@@ -38,7 +39,6 @@ fn to_vote_seconds(timestamp: u64) -> u64 {
 /// treated as belonging to the same vote window.
 pub(crate) fn live_guardian_vote_weight(env: &Env, will_id: u64, will: &Will, now: u64) -> u32 {
     let now = to_vote_seconds(now);
-    let grace_seconds = (will.grace_period_days as u64).saturating_mul(SECONDS_PER_DAY);
     let mut total: u32 = 0;
     for g in will.guardians.iter() {
         if storage::has_guardian_voted(env, will_id, &g.address, now, will.grace_period_days) {
@@ -58,7 +58,10 @@ mod tests {
         // shift the value, so two votes in the same ledger second stay in the
         // same vote window.
         assert_eq!(to_vote_seconds(1_700_000_000), 1_700_000_000);
-        assert_eq!(to_vote_seconds(1_700_000_000), to_vote_seconds(1_700_000_000));
+        assert_eq!(
+            to_vote_seconds(1_700_000_000),
+            to_vote_seconds(1_700_000_000)
+        );
     }
 
     #[test]
