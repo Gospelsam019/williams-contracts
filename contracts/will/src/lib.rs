@@ -306,6 +306,12 @@ mod get_will_status_test;
 mod get_wills_test;
 #[cfg(test)]
 mod hashed_beneficiary_test;
+/// Regression tests for issue #109: keeper-bounty token selection — the
+/// default proportional split across every held token, the owner-targeted
+/// single-token mode (with proportional fallback), and the v1 → v2 storage
+/// migration that added `Will::keeper_bounty_token`.
+#[cfg(test)]
+mod issue_109_test;
 #[cfg(test)]
 mod issue_259_test;
 #[cfg(test)]
@@ -646,7 +652,11 @@ impl WillContract {
     ///   guardian mechanism is disabled without guardians, so any value would
     ///   describe an unreachable quorum (#363). When the list is non-empty the
     ///   value must be between 1 and `guardians.len()`.
-    /// - `keeper_bounty_bps`: optional keeper bounty in basis points.
+    /// - `keeper_bounty_bps`: optional keeper bounty in basis points. Unless
+    ///   the owner later targets a specific token through
+    ///   [`set_keeper_bounty_token`](WillContract::set_keeper_bounty_token),
+    ///   the bounty is deducted proportionally from every token the will
+    ///   holds (#109).
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -909,6 +919,7 @@ impl WillContract {
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: keeper_bounty,
+            keeper_bounty_token: None,
             delegate: None,
         };
         storage::save_will(&env, &will);
@@ -1176,6 +1187,49 @@ impl WillContract {
         } else {
             events::delegate_cleared(&env, will_id, &owner);
         }
+    }
+
+    /// Selects the token the keeper bounty is paid from (#109).
+    ///
+    /// `None` — the default, and what every creation path stores — pays the
+    /// bounty proportionally out of **every** token the will holds: each token
+    /// contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself. A
+    /// keeper's incentive therefore scales with the estate's whole value
+    /// instead of an arbitrarily chosen first token: an estate holding 1 XLM
+    /// and 100,000 USDC pays 1% of each, not 1% of the XLM alone.
+    ///
+    /// `Some(token)` concentrates the whole bounty on that one token, so the
+    /// owner can target the asset keepers actually want — typically the native
+    /// asset, so the bounty covers the keeper's gas. The token must be one the
+    /// will currently holds: the bounty is carved out of a balance the will
+    /// holds, and naming any other token could never pay from it. If the
+    /// targeted token's share rounds to zero at release time, `distribute`
+    /// falls back to the proportional split rather than leaving the keeper
+    /// unpaid.
+    ///
+    /// Passing `None` clears a previous selection and restores the
+    /// proportional split.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotOwner`] if `owner` does not own the will.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::InvalidBountyToken`] if `token` is not a token the will
+    ///   currently holds.
+    pub fn set_keeper_bounty_token(env: Env, will_id: u64, owner: Address, token: Option<Address>) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if let Some(ref bounty_token) = token {
+            if will.balances.get(bounty_token.clone()).unwrap_or(0) <= 0 {
+                panic_with_error!(&env, WillError::InvalidBountyToken);
+            }
+        }
+
+        will.keeper_bounty_token = token.clone();
+        storage::save_will(&env, &will);
+        events::keeper_bounty_token_set(&env, will_id, &token);
     }
 
     /// Batch check-in across multiple wills in a single transaction.
@@ -3586,6 +3640,9 @@ impl WillContract {
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: source.keeper_bounty_bps,
+            // The clone copies the source's balances verbatim, so a targeted
+            // bounty token stays held by the clone (#109).
+            keeper_bounty_token: source.keeper_bounty_token.clone(),
             delegate: None,
         };
         storage::save_will(&env, &will);
@@ -3777,6 +3834,7 @@ impl WillContract {
                 guardian_list_updated_at: now,
                 schema_version: CURRENT_SCHEMA_VERSION,
                 keeper_bounty_bps: 0,
+                keeper_bounty_token: None,
                 delegate: None,
             };
             storage::save_will(&env, &will);
@@ -3819,26 +3877,23 @@ impl WillContract {
     /// migrating (see [`migration::decode_will`]); migrating rewrites them in
     /// the current layout.
     ///
-    /// # Current behavior (v0 → v1)
-    /// Sets the schema_version field to 1.
-    /// # Current behavior is a placeholder
-    /// [`CURRENT_SCHEMA_VERSION`] (defined in [`storage`] and re-exported at
-    /// the crate root) is `1`, and every will created by this
-    /// contract version is already stamped with `schema_version:
-    /// CURRENT_SCHEMA_VERSION` at creation time (see [`create_will`] and
-    /// [`batch_create_wills`]). Because of that, `old_version >=
+    /// # Current behavior (v0 → v2)
+    /// - v0 → v1: sets the `schema_version` field to 1 (v0 wills predate the
+    ///   field being populated; the layout is otherwise identical).
+    /// - v1 → v2: stamps version 2. v2 added `Will::keeper_bounty_token`
+    ///   (#109); `decode_will` already lifts a v1 entry into the current
+    ///   shape with that field defaulted to `None` (the proportional
+    ///   keeper-bounty split), so the step only rewrites the version number.
+    ///
+    /// Wills created by this contract version are already stamped with
+    /// `schema_version: CURRENT_SCHEMA_VERSION` at creation time (see
+    /// [`create_will`] and [`batch_create_wills`]), so `old_version >=
     /// CURRENT_SCHEMA_VERSION` is true for any will this contract could
-    /// actually produce, so the early return below is taken unconditionally
-    /// and the body never runs in practice — there is no real migration
-    /// wired up yet. The `will.schema_version = CURRENT_SCHEMA_VERSION` line
-    /// and the emitted `will_migrated` event exist only as the scaffold a
-    /// future schema bump will hang real field transformations off of; a
-    /// will could only reach this function with `old_version <
-    /// CURRENT_SCHEMA_VERSION` after a future contract upgrade raises
-    /// [`storage::CURRENT_SCHEMA_VERSION`] and defines an actual v1 → v2
-    /// (or later) transformation here. Because that constant is the single
-    /// source of truth, the entry point and the storage layer can never
-    /// disagree about the current version.
+    /// actually produce and the early return below is taken for them. Only a
+    /// will written by an older layout — and left un-migrated — reaches the
+    /// body. Because [`storage::CURRENT_SCHEMA_VERSION`] is the single source
+    /// of truth, the entry point and the storage layer can never disagree
+    /// about the current version.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
@@ -4071,6 +4126,16 @@ impl WillContract {
         will_a.balance = combined_balance;
         will_a.guardian_votes = 0;
         will_a.guardian_cancel_votes = 0;
+
+        // Reconcile the keeper-bounty token with the combined balances (#109):
+        // a token targeted on the surviving will but no longer held after the
+        // merge could never pay a bounty, so the will falls back to the
+        // proportional split instead of naming a token it does not hold.
+        if let Some(ref bounty_token) = will_a.keeper_bounty_token {
+            if will_a.balances.get(bounty_token.clone()).unwrap_or(0) <= 0 {
+                will_a.keeper_bounty_token = None;
+            }
+        }
 
         // Remove old beneficiary indexes for will_b
         for beneficiary in will_b.beneficiaries.iter() {
@@ -4597,6 +4662,7 @@ impl WillContract {
             guardian_list_updated_at,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: 0,
+            keeper_bounty_token: None,
             delegate: None,
         };
         storage::save_will(&env, &child);
@@ -5665,17 +5731,48 @@ pub(crate) fn proportional_share(total: i128, basis_points: u32) -> i128 {
     whole * basis_points as i128 + remainder * basis_points as i128 / BASIS_POINTS_TOTAL
 }
 
+/// Fills `plan` with the keeper bounty of **every** token the will holds:
+/// each token contributes `floor(balance * keeper_bounty_bps / 10_000)` of
+/// itself, skipping tokens whose share rounds to zero (#109).
+///
+/// This is the default selection whenever `will.keeper_bounty_token` is `None`
+/// (or names a token the will no longer holds), and the fallback when a
+/// targeted token's share rounds to zero. It is what makes a keeper's
+/// incentive on a multi-token estate scale with the estate's whole value
+/// instead of an arbitrarily chosen first token.
+fn collect_proportional_bounties(plan: &mut Map<Address, i128>, will: &Will) {
+    for (token_addr, total) in will.balances.iter() {
+        if total == 0 {
+            continue;
+        }
+        let amount = proportional_share(total, will.keeper_bounty_bps);
+        if amount > 0 {
+            plan.set(token_addr, amount);
+        }
+    }
+}
+
 /// Pays out every token balance the will holds, marks the will `Released`,
 /// and publishes the `InheritanceReleased` event.
 ///
 /// For each token in `will.balances` the balance is split as follows:
 ///
-/// 1. The keeper bounty (`will.keeper_bounty_bps`), taken out of a single
-///    token, when a non-owner keeper released the will (#297). The token is
-///    chosen once, up front, as the first entry of `will.balances` whose
-///    bounty share rounds above zero; that same token is both reduced to make
-///    room and used to pay the keeper (#378). If no token's share rounds
-///    above zero, no bounty is paid and no beneficiary share is reduced.
+/// 1. The keeper bounty (`will.keeper_bounty_bps`), when a non-owner keeper
+///    released the will (#297). Which tokens it comes out of is chosen once,
+///    up front, before any per-token math runs (#378/#109):
+///    - `will.keeper_bounty_token = Some(t)` — the whole bounty is computed
+///      from and paid out of `t` (that same token is reduced to make room and
+///      used to pay the keeper, so the two can never desynchronise). If `t`'s
+///      share rounds to zero, selection falls back to the proportional split
+///      so the keeper is never left unpaid while the will holds value
+///      elsewhere.
+///    - `will.keeper_bounty_token = None` (the default) — every held token
+///      contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself,
+///      so the keeper is paid in proportion to the estate's whole value
+///      instead of whatever token was locked first (#109).
+///
+///    If every token's share rounds to zero, no bounty is paid and no
+///    beneficiary share is reduced.
 /// 2. The reserve for hashed beneficiaries that have not yet called
 ///    `reveal_and_claim` (#181/#186). It is withheld from the visible
 ///    beneficiaries and left in `will.balances` for later claiming.
@@ -5739,34 +5836,47 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         .map(|k| k != &will.owner && will.keeper_bounty_bps > 0)
         .unwrap_or(false);
 
-    // Pick the single token the bounty is computed from *and* paid out of,
-    // before any per-token math runs (#378). Previously the bounty was
-    // computed inside the per-token loop under a `bounty_amount == 0` guard
-    // while the payout happened in the first entry of `transfer_plan`: on a
-    // multi-token will whose first token's bounty rounded to zero, the amount
-    // was computed against a *later* token but transferred with the *first*
-    // token's client — and that first token's balance had never been reduced
-    // to make room, so the keeper was paid out of beneficiaries' funds or the
-    // whole release aborted. Choosing the token up front and keying both the
-    // deduction and the payment off the same address makes the two impossible
-    // to desynchronise.
+    // Per-token bounty amounts, keyed by the token each is paid from. Both the
+    // deduction inside the per-token loop and the payout in the INTERACTIONS
+    // phase read this one map, so the two can never desynchronise (#378).
     //
-    // Rounding: the bounty is `floor(balance * keeper_bounty_bps / 10_000)`
-    // through [`proportional_share`], so a token too small for the share to
-    // round above zero contributes nothing and is skipped. If *every* token
-    // rounds to zero, no bounty is paid at all and no beneficiary share is
-    // reduced — the tokens are distributed in full.
-    let mut bounty_token: Option<(Address, i128)> = None;
+    // Token selection (#109):
+    //
+    // - `keeper_bounty_token = Some(t)` — the whole bounty comes out of `t`.
+    //   If `t`'s share rounds to zero the selection falls back to the
+    //   proportional split below, so a targeted-but-dust token can never
+    //   leave the keeper unpaid while the will holds value elsewhere.
+    // - `keeper_bounty_token = None` (the default) — every held token
+    //   contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself.
+    //   A keeper on a multi-token estate is then paid in proportion to the
+    //   estate's whole value instead of whatever token happened to be locked
+    //   first: an estate of 1 XLM and 100,000 USDC pays 1% of each, not 1% of
+    //   the XLM alone (#109).
+    //
+    // Rounding: a token too small for its share to round above zero
+    // contributes nothing; if *every* token rounds to zero, no bounty is paid
+    // at all and no beneficiary share is reduced — the tokens are distributed
+    // in full.
+    let mut bounty_plan: Map<Address, i128> = Map::new(env);
     if should_pay_bounty {
-        for (token_addr, total) in will.balances.iter() {
-            if total == 0 {
-                continue;
+        let targeted = will.keeper_bounty_token.as_ref().and_then(|bounty_token| {
+            let total = will.balances.get(bounty_token.clone()).unwrap_or(0);
+            if total > 0 {
+                Some((bounty_token.clone(), total))
+            } else {
+                None
             }
-            let amount = proportional_share(total, will.keeper_bounty_bps);
-            if amount > 0 {
-                bounty_token = Some((token_addr, amount));
-                break;
+        });
+        match targeted {
+            Some((token_addr, total)) => {
+                let amount = proportional_share(total, will.keeper_bounty_bps);
+                if amount > 0 {
+                    bounty_plan.set(token_addr, amount);
+                } else {
+                    collect_proportional_bounties(&mut bounty_plan, will);
+                }
             }
+            None => collect_proportional_bounties(&mut bounty_plan, will),
         }
     }
 
@@ -6003,20 +6113,23 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         }
 
         // Pay the keeper bounty out of the very token it was computed from,
-        // whose balance was reduced to make room for it above (#378).
-        if let (Some((bounty_addr, bounty_amount)), Some(keeper_addr)) = (&bounty_token, keeper) {
-            if bounty_addr == &token_addr
-                && *bounty_amount > 0
-                && pay_or_record_failure(
-                    env,
-                    &token_addr,
-                    &contract_address,
-                    keeper_addr,
-                    *bounty_amount,
-                    will.id,
-                )
-            {
-                events::keeper_bounty_paid(env, will.id, keeper_addr, *bounty_amount);
+        // whose balance was reduced to make room for it above (#378). A
+        // proportional selection (#109) pays — and publishes — one bounty per
+        // token, in the token's own units.
+        if let Some(bounty_amount) = bounty_plan.get(token_addr.clone()) {
+            if bounty_amount > 0 {
+                if let Some(keeper_addr) = keeper {
+                    if pay_or_record_failure(
+                        env,
+                        &token_addr,
+                        &contract_address,
+                        keeper_addr,
+                        bounty_amount,
+                        will.id,
+                    ) {
+                        events::keeper_bounty_paid(env, will.id, keeper_addr, bounty_amount);
+                    }
+                }
             }
         }
     }
