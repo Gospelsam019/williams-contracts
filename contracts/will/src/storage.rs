@@ -927,39 +927,6 @@ pub fn set_guardian_voted(
 /// Recomputes the live `(weight, count)` of release votes for `will` from
 /// storage, counting each guardian at most once and ignoring expired votes.
 ///
-/// Tallying from the per-guardian records (rather than incrementing a running
-/// counter on every call) is what deduplicates votes (#458): a guardian who
-/// re-votes after their previous vote expired replaces that record instead of
-/// being counted a second time.
-pub fn tally_guardian_votes(env: &Env, will: &Will, now: u64, expiry_days: u64) -> (u32, u32) {
-    let mut weight: u32 = 0;
-    let mut count: u32 = 0;
-    for guardian in will.guardians.iter() {
-        if has_guardian_voted(env, will.id, &guardian.address, now, expiry_days) {
-            weight += guardian.weight;
-            count += 1;
-        }
-    }
-    (weight, count)
-}
-
-/// Cancel-vote counterpart of [`tally_guardian_votes`].
-pub fn tally_guardian_cancel_votes(
-    env: &Env,
-    will: &Will,
-    now: u64,
-    expiry_days: u64,
-) -> (u32, u32) {
-    let mut weight: u32 = 0;
-    let mut count: u32 = 0;
-    for guardian in will.guardians.iter() {
-        if has_guardian_cancel_voted(env, will.id, &guardian.address, now, expiry_days) {
-            weight += guardian.weight;
-            count += 1;
-        }
-    }
-    (weight, count)
-}
 
 /// Removes the trigger vote recorded for `guardian` against `will_id`, if any.
 ///
@@ -1067,8 +1034,10 @@ pub fn recount_guardian_votes(env: &Env, will: &Will, now: u64, expiry_days: u64
             continue;
         }
         if has_guardian_voted(env, will.id, &guardian.address, now, expiry_days) {
-            weight = weight.saturating_add(guardian.weight);
-            votes = votes.saturating_add(1);
+            if guardian.consent == crate::GuardianConsent::Accepted {
+                weight = weight.saturating_add(guardian.weight);
+                votes = votes.saturating_add(1);
+            }
         } else {
             // Expired: drop the row so it cannot be recounted on a later pass.
             env.storage().persistent().remove(&key);
@@ -1104,8 +1073,10 @@ pub fn recount_guardian_cancel_votes(
             continue;
         }
         if has_guardian_cancel_voted(env, will.id, &guardian.address, now, expiry_days) {
-            weight = weight.saturating_add(guardian.weight);
-            votes = votes.saturating_add(1);
+            if guardian.consent == crate::GuardianConsent::Accepted {
+                weight = weight.saturating_add(guardian.weight);
+                votes = votes.saturating_add(1);
+            }
         } else {
             env.storage().persistent().remove(&key);
         }

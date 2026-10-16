@@ -167,7 +167,7 @@ If you need more than 10 heirs, you can:
 | `top_up` | Adds more of the token to an existing will | `will_id`, `owner`, `amount` | — |
 | `get_will` | Reads the full state of a will | `will_id` | `Will` |
 | `get_will_status` | Reads only a will's lifecycle status, without loading the rest of the struct | `will_id` | `WillStatus` |
-| `get_time_until_deadline` | Seconds until the will's next relevant deadline (check-in or grace period); negative if past due, `None` if not applicable to the current status | `will_id` | `Option<i64>` |
+| `get_time_until_deadline` | Seconds until the will's next relevant deadline (confirmation, check-in, or grace period); negative if past due, `None` if not applicable to the current status | `will_id` | `Option<i64>` |
 | `get_wills_by_owner` | Lists a page of wills owned by an address | `owner`, `cursor`, `limit` | `Vec<Will>` |
 | `get_owner_stats` | Aggregate stats for an owner: total wills, non-terminal wills, and locked value per token across all their wills | `owner` | `OwnerStats` |
 | `get_wills_by_beneficiary` | Lists every will an address is named in | `beneficiary` | `Vec<Will>` |
