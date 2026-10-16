@@ -40,6 +40,9 @@ data, in order.
 | `batch` | `batch_create_wills` (second topic is `owner`) | `will_ids: Vec<u64>` |
 | `split` | `split_will` (topic is the original id) | `(new_id: u64, owner: Address, split_amount: i128)` |
 | `hclaim` | `reveal_and_claim` | `(claimant: Address, amount: i128)` |
+| `payfail` | `distribute`, `reveal_and_claim` (failed transfer) | `(token: Address, recipient: Address, amount: i128)` |
+| `payretry` | `retry_failed_payout` | `(token: Address, recipient: Address, amount: i128)` |
+| `payredir` | `redirect_failed_payout` | `(token: Address, old_recipient: Address, new_recipient: Address, amount: i128)` |
 
 ## `archived`
 
