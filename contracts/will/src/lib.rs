@@ -379,6 +379,12 @@ mod set_delegate_test;
 #[cfg(test)]
 mod split_will_test;
 #[cfg(test)]
+/// Regression tests for issues #57, #58, #59, and #60: mixed visible/hashed
+/// percentage beneficiaries, split_will rejection on hashed-beneficiary wills,
+/// seq-based pagination cursor for get_will_history_page, and
+/// check_resource_costs.sh graceful handling of the disabled profile module.
+mod issue_57_58_59_60_test;
+#[cfg(test)]
 mod issue_490_493_test;
 
 /// Comprehensive negative authorization tests asserting that every entry point
@@ -1059,11 +1065,6 @@ impl WillContract {
         // --- EFFECTS: mutate state and persist before any external calls ---
         storage::decrement_active_will_count(&env);
         storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
-        for (token_addr, balance) in balances_snapshot.iter() {
-            if balance > 0 {
-                storage::adjust_locked_value(&env, &token_addr, -balance);
-            }
-        }
 
         will.balance = 0;
         will.balances = Map::new(&env);
@@ -4150,20 +4151,24 @@ impl WillContract {
     ///
     /// # Parameters
     /// - `will_id`: the will whose trail to read.
-    /// - `cursor`: optional zero-based offset into the trail. Pass `None` or `0`
-    ///   for the first page.
+    /// - `cursor`: optional sequence number (`WillStatusTransition::seq`).
+    ///   Only entries with `seq` **strictly greater than** the cursor are
+    ///   returned; pass `None` or `Some(0)` to start from the beginning.
+    ///   To page forward, pass the `seq` of the last entry received as the
+    ///   next cursor.
     /// - `limit`: maximum number of transitions to return. Capped at
     ///   [`storage::MAX_PAGE_SIZE`].
     ///
     /// # Pagination
     /// 1. Call with `cursor=None, limit=N`.
-    /// 2. If the page has `N` entries, call again with `cursor = offset + N`.
+    /// 2. If the page has `N` entries, call again with
+    ///    `cursor = Some(last_entry.seq as u32)`.
     /// 3. Repeat until a page comes back shorter than `N`.
     ///
-    /// The cursor is positional, not keyed. It is stable for the duration of a
-    /// walk as long as no transition is appended past the cursor, but a
-    /// concurrent write that trips the history cap trims the front of the
-    /// trail and shifts every earlier offset — restart the walk in that case.
+    /// The seq-based cursor is stable across history trimming: when the oldest
+    /// entries are dropped to enforce the cap, no existing `seq` value shifts,
+    /// so a stored cursor never silently skips or re-reads entries on the next
+    /// call (#59).
     pub fn get_will_history_page(
         env: Env,
         will_id: u64,
@@ -4345,7 +4350,9 @@ impl WillContract {
     /// - [`WillError::DuplicateBeneficiary`] if an address appears more than
     ///   once in `beneficiaries_to_split`.
     /// - [`WillError::InvalidSplit`] if `beneficiaries_to_split` is empty or would
-    ///   leave the source will with no beneficiaries.
+    ///   leave the source will with no beneficiaries, or if the source will has
+    ///   unrevealed hashed beneficiaries (splitting would leave hashed
+    ///   commitments under-funded on the source — see issue #58).
     /// - [`WillError::FixedAmountExceedsBalance`] if either the remaining or
     ///   split beneficiary list has `Allocation::FixedAmount` entries that no
     ///   longer fit the resulting balance.
@@ -4359,6 +4366,17 @@ impl WillContract {
         owner.require_auth();
         let mut source = load_owned(&env, will_id, &owner);
         assert_status(&env, &source, WillStatus::Active, WillError::WillNotActive);
+
+        // Reject the split if the source will has any unrevealed hashed
+        // beneficiaries (#58). A split subtracts token balances from the
+        // source but leaves hashed basis points unchanged, which would leave
+        // the source under-funded at reveal_and_claim time. Until a
+        // proportional re-allocation scheme is implemented, the safest
+        // behaviour is to refuse the split outright, matching the treatment
+        // of merge_wills (MergeWithHashedBeneficiaries / code 47).
+        if !source.hashed_beneficiaries.is_empty() {
+            panic_with_error!(&env, WillError::InvalidSplit);
+        }
 
         if tokens.is_empty() || tokens.len() > MAX_TOKENS {
             panic_with_error!(&env, WillError::InvalidTokenCount);
@@ -4626,11 +4644,6 @@ impl WillContract {
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        // A commitment that is not a SHA-256 digest can never match a hashed
-        // pre-image, so the slot would be unclaimable (#452).
-        if commitment.len() != 32 {
-            panic_with_error!(&env, WillError::InvalidPreimage);
-        }
         // Validate the new slot before mutating the will, so a rejected call
         // leaves no partial state behind (#371).
         assert_valid_hashed_beneficiary(&env, &will.hashed_beneficiaries, &commitment, percentage);
@@ -5038,9 +5051,12 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
 ///   one entry per address, so a repeat would silently drop one of the
 ///   allocations rather than actually splitting the share).
 /// - Every `Allocation::Percentage` must be non-zero, and all percentage
-///   shares together must sum to exactly 10,000 basis points (100 % of
-///   whatever remains once fixed amounts are set aside) — this guarantees
-///   every token balance is fully distributed with no dust left behind.
+///   shares together must not exceed 10,000 basis points — over-allocation
+///   is rejected, but a total below 10,000 is allowed so that hashed
+///   beneficiary slots can fill the remainder (#57). The combined total
+///   (visible + hashed) is validated to equal exactly 10,000 by
+///   [`assert_valid_percentages`], which runs after every
+///   [`WillContract::add_hashed_beneficiary`] call.
 /// - Every `Allocation::FixedAmount` must be positive, and the sum of every
 ///   fixed amount on the will must never exceed `primary_balance` —
 ///   otherwise `distribute` could not pay every fixed beneficiary in full.
@@ -5372,6 +5388,7 @@ fn primary_token_balance(balances: &Map<Address, i128>, primary_token: &Address)
     balances.get(primary_token.clone()).unwrap_or(0)
 }
 
+
 /// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
 /// repeated address. Also validates that the owner is not in the guardian list.
 ///
@@ -5666,9 +5683,6 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     let token_count = will.balances.len();
 
     // --- COMPUTE: calculate every share from the current (pre-mutation) balances ---
-    // Calculate keeper bounty if applicable (not paid to owner, only to other keepers)
-    let mut bounty_amount: i128 = 0;
-    let mut bounty_computed = false;
     // A keeper bounty is due only to a caller other than the owner.
     let should_pay_bounty = keeper
         .as_ref()
@@ -5738,24 +5752,15 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             continue;
         }
 
-        // Calculate bounty from first token's balance if applicable. The
-        // bounty is carved out of this token's balance *before* beneficiary
-        // shares are computed; paying it on top of a full distribution would
-        // spend funds belonging to other wills held by this contract (#458).
-        let mut token_bounty: i128 = 0;
-        if should_pay_bounty && !bounty_computed {
-            bounty_computed = true;
-            bounty_amount = proportional_share(total, will.keeper_bounty_bps);
-            token_bounty = bounty_amount;
-        }
-
         // Deduct the keeper bounty only from the token it was computed from.
         // Comparing the address (rather than relying on iteration position)
         // keeps the deduction and the payout tied to the same token (#378).
+        let mut token_bounty: i128 = 0;
         let mut available = total;
         if let Some((bounty_addr, bounty_amount)) = &bounty_token {
             if bounty_addr == &token_addr {
-                available = (total - bounty_amount).max(0);
+                token_bounty = *bounty_amount;
+                available = (total - token_bounty).max(0);
             }
         }
 
@@ -5844,6 +5849,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         // draw from, so the full token balance is preserved across all paths.
         let local_hashed_reserve = hashed_reserves.get(token_addr.clone()).unwrap_or(0);
         let mut planned: i128 = token_bounty;
+        if let Some(reserve) = hashed_reserves.get(token_addr.clone()) {
+            planned = match planned.checked_add(reserve) {
+                Some(v) => v,
+                None => panic_with_error!(env, WillError::DistributionMismatch),
+            };
+        }
         for (_, share) in shares.iter() {
             if share < 0 {
                 panic_with_error!(env, WillError::DistributionMismatch);

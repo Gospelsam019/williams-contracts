@@ -10,12 +10,25 @@
 # (no wall-clock timing, no randomness), so an exact diff is the right check
 # here, not a fuzzy tolerance.
 #
+# If the profile module is disabled (mod profile; is commented out in lib.rs),
+# the script exits cleanly with an informational message rather than failing
+# with a confusing "Could not find a profile table" error (issue #60).
+#
 # Usage: scripts/check_resource_costs.sh
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# Detect whether the profile module is active in lib.rs.
+# The line is considered disabled when it is commented out (leading // or #).
+if ! grep -qE '^[[:space:]]*mod profile;' contracts/will/src/lib.rs; then
+  echo "INFO: The profile module (mod profile;) is currently disabled in"
+  echo "      contracts/will/src/lib.rs. Resource-cost profiling is skipped."
+  echo "      To enable it, uncomment the 'mod profile;' line and re-run this script."
+  exit 0
+fi
 
 extract_table() {
   awk '/^\| entry point \|/{flag=1} flag && /^\|/{print} flag && !/^\|/{flag=0}'

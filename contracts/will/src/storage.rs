@@ -1138,19 +1138,18 @@ pub fn get_history(env: &Env, will_id: u64) -> Vec<WillStatusTransition> {
 
 /// Returns a bounded page of `will_id`'s audit trail, oldest-first.
 ///
-/// `cursor` is an optional zero-based index into the trail; results start at
-/// that offset. `limit` is capped at [`MAX_PAGE_SIZE`], matching the other
-/// paginated reads in this contract.
+/// `cursor` is an optional sequence number (`WillStatusTransition::seq`).
+/// Results include only entries whose `seq` is **strictly greater than** the
+/// cursor, so the caller can page forward by passing the `seq` of the last
+/// entry it received. Pass `None` (or `Some(0)`) to start from the beginning.
+/// `limit` is capped at [`MAX_PAGE_SIZE`], matching the other paginated reads
+/// in this contract.
 ///
-/// The cursor is positional rather than keyed like [`paginate_ids`]'s will-id
-/// cursor because history entries carry no sortable key of their own — the
-/// only ordering they have is their position in the trail, and the trail is
-/// append-then-trim-from-the-front. A caller paging from the start therefore
-/// holds a stable view for the duration of the walk as long as no transition
-/// is appended past it; once the cap trims the front, earlier offsets shift and
-/// the walk should restart. That is acceptable because the tail is what
-/// matters and `cursor: None` always returns the newest-and-oldest-remaining
-/// page from the start of the retained window.
+/// Unlike a positional index cursor, a seq-based cursor is stable across
+/// history trimming: when [`MAX_HISTORY_ENTRIES`] is reached and the oldest
+/// entries are dropped, no existing `seq` value shifts, so a client that
+/// stored the seq of the last-seen entry will never skip or re-read entries
+/// on the next call (#59).
 pub fn paginate_history(
     env: &Env,
     will_id: u64,
@@ -1159,32 +1158,22 @@ pub fn paginate_history(
 ) -> Vec<WillStatusTransition> {
     let history = get_history(env, will_id);
     let page_size = limit.min(MAX_PAGE_SIZE);
-    let start = cursor.unwrap_or(0);
     let mut result = Vec::new(env);
 
-    // Short-circuit: if page_size is zero or the requested start is beyond
-    // the end of the trail, return empty without iterating.
-    if page_size == 0 || start as usize >= history.len() as usize {
+    if page_size == 0 {
         return result;
     }
 
-    // Compute the end offset before iterating so we can break with a simple
-    // counter comparison rather than calling `result.len()` (a Soroban Vec
-    // operation) on every step. `saturating_add` prevents overflow when
-    // `start` is near `u32::MAX`.
-    let end = start.saturating_add(page_size);
+    // Treat the cursor as a seq value: include entries with seq > cursor.
+    // `None` and `Some(0)` both start from the beginning because seq
+    // counters start at 1.
+    let after_seq: u64 = cursor.map(|v| v as u64).unwrap_or(0);
+
     let mut count: u32 = 0;
-    for (index, entry) in (0_u32..).zip(history.iter()) {
-        if index >= end {
-            break;
-        }
-        if index >= start {
+    for entry in history.iter() {
+        if entry.seq > after_seq {
             result.push_back(entry);
             count += 1;
-            // Once we've collected page_size entries we can stop; this check
-            // is redundant with the `end` guard above but makes the intent
-            // explicit and avoids any off-by-one if page_size or start ever
-            // change semantics.
             if count >= page_size {
                 break;
             }

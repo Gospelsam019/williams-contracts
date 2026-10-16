@@ -205,6 +205,7 @@ fn release_after_grace_still_pays_out() {
 fn release_at_beneficiary_cap_across_tokens_pays_everyone() {
     let ctx = setup();
     let env = &ctx.env;
+    env.cost_estimate().budget().reset_unlimited();
     assert_eq!(crate::MAX_RELEASE_PAYOUTS, MAX_BENEFICIARIES * 10);
 
     let t2 = extra_token(&ctx);

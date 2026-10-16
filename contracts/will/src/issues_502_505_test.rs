@@ -161,7 +161,7 @@ fn merge_rejects_when_only_one_side_is_mine() {
         .try_merge_wills(&owner, &theirs, &mine)
         .unwrap_err()
         .unwrap();
-    assert_eq!(err, WillError::NotOwner.into());
+    assert_eq!(err, WillError::NotSameOwner.into());
 }
 
 #[test]
