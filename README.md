@@ -254,7 +254,8 @@ for the full context.
 
 ### What `archive_will` removes
 
-`archive_will` is permissionless: once a will is `Released` or `Cancelled`, any
+`archive_will` is permissionless: once a will is `Released`, `Cancelled` or
+`Settled` (closed via `close_will`), any
 account may call it to reclaim storage. Beyond the will entry and the
 owner/beneficiary/Triggered indexes, it also drops the will's on-chain
 `WillHistory` entry and every `GuardianVote` / `GuardianCancelVote` entry
@@ -295,7 +296,7 @@ disambiguate.
 | 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
 | 12 | `TooManyBeneficiaries` | The beneficiary list was empty or exceeded `MAX_BENEFICIARIES` (10), or the guardian/token list exceeded its cap. See [the FAQ](#faq-why-is-there-a-beneficiary-limit). |
 | 12 | `TooManyBeneficiaries` | A list-length cap was exceeded: a `beneficiaries` list that is empty or longer than `MAX_BENEFICIARIES`, a `guardians` list longer than `MAX_GUARDIANS`, or a `batch_create_wills` spec list that is empty or longer than `BATCH_MAX`. Token-list bounds are **not** reported here — those raise `InvalidTokenCount`. |
-| 13 | `WillNotSettled` | The requested action requires the will to be `Released` or `Cancelled`. |
+| 13 | `WillNotSettled` | The requested action requires the will to be `Released`, `Cancelled` or `Settled`. |
 | 14 | `WillNotBothActive` | Both wills in a merge must be `Active`. |
 | 15 | `SameWillId` | The same will id was supplied for both sides of a merge. |
 | 16 | `MergeWouldExceedLimits` | Merging would exceed the maximum beneficiaries or guardians. |
