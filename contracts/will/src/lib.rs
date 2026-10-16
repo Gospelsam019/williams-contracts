@@ -293,6 +293,17 @@ mod hashed_beneficiary_test;
 mod issue_259_test;
 #[cfg(test)]
 mod issue_260_test;
+/// Regression test for issue #51: `clone_will` validates owner and beneficiary
+/// index capacities before executing any token transfer, mirroring the
+/// Checks-Effects-Interactions order already enforced by `create_will`.
+#[cfg(test)]
+mod issue_51_test;
+/// Regression tests for issue #52: `clone_will` now deep-copies hashed
+/// beneficiary slots from the source will (resetting claimed flags) instead of
+/// dropping them, so the cloned will's visible + hashed basis points continue
+/// to satisfy the 10,000 bps invariant.
+#[cfg(test)]
+mod issue_52_test;
 #[cfg(test)]
 mod issue_261_test;
 #[cfg(test)]
@@ -3310,6 +3321,12 @@ impl WillContract {
         }
         assert_valid_guardians(&env, &owner, &source_guardian_addresses);
 
+        // Checked before any transfer: a call that was always going to fail
+        // MAX_WILLS_PER_INDEX for the owner or a beneficiary should fail on
+        // this cheap in-contract check, not after the token transfer below
+        // has already succeeded (#51).
+        storage::assert_index_capacity(&env, &owner, &source.beneficiaries);
+
         // Build balances map and transfer tokens from the owner.
         let mut balances: Map<Address, i128> = Map::new(&env);
         for (token_addr, amount) in tokens.iter() {
@@ -3346,6 +3363,21 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
+        // Deep-copy hashed beneficiaries from the source, resetting each
+        // `claimed` flag so the cloned will's commitments are fresh and
+        // can be independently revealed via `reveal_and_claim` (#52).
+        // Dropping hashed_beneficiaries and keeping only the visible
+        // beneficiaries would violate the 10,000 bps invariant whenever
+        // the source reserved some basis points for hashed slots.
+        let mut cloned_hashed: Vec<HashedBeneficiary> = Vec::new(&env);
+        for hb in source.hashed_beneficiaries.iter() {
+            cloned_hashed.push_back(HashedBeneficiary {
+                commitment: hb.commitment.clone(),
+                percentage: hb.percentage,
+                claimed: false,
+            });
+        }
+
         let will = Will {
             id: will_id,
             owner: owner.clone(),
@@ -3354,7 +3386,7 @@ impl WillContract {
             is_native: false,
             balance: primary_amount,
             beneficiaries: source.beneficiaries.clone(),
-            hashed_beneficiaries: Vec::new(&env),
+            hashed_beneficiaries: cloned_hashed,
             checkin_period_days: source.checkin_period_days,
             grace_period_days: source.grace_period_days,
             last_checkin: now,

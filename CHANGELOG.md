@@ -56,6 +56,32 @@ gets its own [contract spec artifact](./spec) once exported.
   `deployments/testnet.json` if it disagrees with source `CONTRACT_VERSION`,
   catching a stale or wrong Wasm artifact that source-level checks alone
   cannot (#501).
+- Added `spec-freshness` CI job to `.github/workflows/scripts-check.yml`:
+  runs `scripts/export-spec.sh --check` on every push and pull request,
+  ensuring that any PR touching public entry point signatures, error codes, or
+  struct fields must also update the committed spec snapshot or bump the
+  crate version (#49).
+- Added `docs/ERROR_CODES.md`: a complete reference table mapping every
+  `WillError` discriminant (1–53) to its variant name and description, so SDK
+  maintainers and Drips ecosystem contributors can decode raw Soroban
+  `ContractError(u32)` codes without inspecting source (#50).
+
+### Fixed
+- `clone_will` now calls `storage::assert_index_capacity` immediately after
+  loading the source will and validating guardians, and before executing any
+  token transfers. A call that was always going to fail
+  `MAX_WILLS_PER_INDEX` for the owner or a cloned beneficiary now aborts on
+  this cheap in-contract check rather than after an unnecessary cross-contract
+  transfer invocation (#51).
+- `clone_will` now deep-copies `hashed_beneficiaries` from the source will
+  into the child will, resetting each `claimed` flag to `false`. Previously
+  `hashed_beneficiaries` was set to `Vec::new(&env)`, silently dropping hashed
+  slots and leaving the clone's visible beneficiaries with fewer than 10,000
+  basis points whenever the source had reserved some bps for hashed slots (#52).
+- Error variants in `contracts/will/src/errors.rs` are now arranged in
+  strictly ascending discriminant order (`1`–`53`), making the source easier to
+  read and the per-code documentation easier to navigate. All discriminant
+  values are unchanged, preserving strict backwards ABI compatibility (#50).
 
 ### Fixed
 - `renounce_beneficiary` redistribution now caps the percentage total at
