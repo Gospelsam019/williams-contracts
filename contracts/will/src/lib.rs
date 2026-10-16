@@ -250,6 +250,13 @@ mod issue_299_test;
 #[cfg(test)]
 mod issue_350_353_test;
 
+/// Regression tests for issues #5-#8: `cancel_will` and `release_inheritance`
+/// each decremented the protocol locked totals twice, `split_will` incremented
+/// the active-will counter twice, and `archive_will` rejected `Settled` wills
+/// so closed wills could never be archived.
+#[cfg(test)]
+mod issue_5_8_test;
+
 /// Regression test: `has_guardian_voted` / `has_guardian_cancel_voted` use a
 /// checked elapsed-time subtraction and cannot underflow when `now` precedes
 /// the recorded vote timestamp.
@@ -1453,21 +1460,13 @@ impl WillContract {
             symbol_short!("release"),
         );
 
-        // Release the protocol's locked-value total for *every* token the will
-        // held, not just the primary-token mirror. `distribute` pays the
-        // balances out to beneficiaries, so without this the totals stay
-        // inflated at their pre-release value forever — the same class of bug
-        // #353 fixed for `cancel_will`, which was the only other terminal path
-        // that moved value out of a will.
-        //
-        // `cancel_will` does the mirror of this: it decrements before mutating
-        // the will, keeping the changes-then-interactions ordering, because
-        // `distribute` performs the token transfers below.
-        for (token_addr, balance) in will.balances.iter() {
-            if balance > 0 {
-                storage::adjust_locked_value(&env, &token_addr, -balance);
-            }
-        }
+        // The protocol's locked-value total for *every* token the will held is
+        // released inside `distribute`, whose effects block applies
+        // `storage::adjust_locked_for_balances(..., -1)` to `will.balances`
+        // exactly once, alongside `decrement_active_will_count`, before the
+        // token transfers below. Decrementing here as well would deduct each
+        // token twice and drive `total_locked_by_token` negative on every
+        // release (#6), so the single deduction is left to `distribute`.
 
         // Re-validate status and size immediately before any funds move
         // (#490, #491). See `assert_release_preconditions`.
@@ -1541,15 +1540,11 @@ impl WillContract {
         // --- EFFECTS: mutate state and persist before any external calls ---
         storage::decrement_active_will_count(&env);
         storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
-        // Decrement the protocol locked-value total for *every* token the will
-        // held, not just the primary-token mirror, so a multi-token
-        // cancellation does not leave the other tokens' totals permanently
-        // inflated (#353).
-        for (token_addr, balance) in balances_snapshot.iter() {
-            if balance > 0 {
-                storage::adjust_locked_value(&env, &token_addr, -balance);
-            }
-        }
+        // `adjust_locked_for_balances` already decrements the protocol
+        // locked-value total for *every* token in the snapshot, so a
+        // multi-token cancellation does not leave the other tokens' totals
+        // permanently inflated (#353). A second per-token loop here would
+        // deduct each total twice (#5).
 
         will.balance = 0;
         will.balances = Map::new(&env);
@@ -4156,7 +4151,7 @@ impl WillContract {
     /// by Soroban's state archival system.
     ///
     /// **Callable by anyone**: no `require_auth` is enforced. Once a will
-    /// reaches a terminal state (`Released` or `Cancelled`) any party may
+    /// reaches a terminal state (`Released`, `Cancelled` or `Settled`) any party may
     /// call this function to reclaim on-chain storage and reduce ledger-rent
     /// costs. The design is intentional — a will's final asset distributions
     /// are already complete before this point — but it creates an observable
@@ -4210,7 +4205,7 @@ impl WillContract {
     ///    event log, which archival does not touch.
     /// 2. **Network TTL expiry** — the will's persistent entry lapsed.
     ///    Terminal wills stop renewing their TTL (see `storage::save_will`),
-    ///    so Released/Cancelled wills gradually expire. The entry can be
+    ///    so Released/Cancelled/Settled wills gradually expire. The entry can be
     ///    restored by a network-level state-restore transaction; until then
     ///    the contract cannot serve it.
     /// 3. **Never created** — the id was never allocated. Clients can rule
@@ -4233,17 +4228,26 @@ impl WillContract {
     /// - [`WillError::WillNotFound`] if no will exists with this id (see
     ///   the ambiguity note above — this error is also returned for wills
     ///   that have already been archived).
-    /// - [`WillError::WillNotSettled`] if the will is not `Released` or `Cancelled`.
+    /// - [`WillError::WillNotSettled`] if the will is not `Released`,
+    ///   `Cancelled` or `Settled`.
     pub fn archive_will(env: Env, will_id: u64) {
         let will = load_will(&env, will_id);
-        if will.status != WillStatus::Released && will.status != WillStatus::Cancelled {
+        // `Settled` is terminal too: `close_will` moves a `Released` will to
+        // `Settled` as its final step, so rejecting it here would trap closed
+        // wills in active storage forever, paying rent with no path to
+        // archival (#8).
+        if will.status != WillStatus::Released
+            && will.status != WillStatus::Cancelled
+            && will.status != WillStatus::Settled
+        {
             panic_with_error!(&env, WillError::WillNotSettled);
         }
 
-        let reason = if will.status == WillStatus::Released {
-            symbol_short!("released")
-        } else {
-            symbol_short!("cancelled")
+        let reason = match will.status {
+            WillStatus::Cancelled => symbol_short!("cancelled"),
+            WillStatus::Settled => symbol_short!("settled"),
+            // The gate above leaves only `Released`.
+            _ => symbol_short!("released"),
         };
         storage::archive_will(&env, &will);
 
@@ -4500,8 +4504,8 @@ impl WillContract {
         storage::save_will(&env, &child);
         storage::index_by_owner(&env, &source.owner, new_id);
         // The child is a new live will. Its balance moved out of the source,
-        // so the locked totals are unchanged.
-        storage::increment_active_will_count(&env);
+        // so the locked totals are unchanged. The source was already counted
+        // as active, so this nets +1 live will for the child alone (#7).
         storage::increment_active_will_count(&env);
 
         // Seed the child's audit trail with the same `create` transition
