@@ -400,6 +400,14 @@ mod update_will_settings_test;
 mod wills_by_owner_status_test;
 // #[cfg(test)]
 // mod issue_486_489_test; // TODO: ContractEvents API
+#[cfg(test)]
+mod issue_10_test;
+#[cfg(test)]
+mod issue_11_test;
+#[cfg(test)]
+mod issue_12_test;
+#[cfg(test)]
+mod issue_9_test;
 
 use soroban_sdk::{
     contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address,
@@ -1829,9 +1837,19 @@ impl WillContract {
                 // remainder as a non-negative top-up (overage, never underage),
                 // however unevenly the renounced share divides — e.g. a prime
                 // number of basis points.
+                //
+                // #12: hashed beneficiaries hold a committed share of the same
+                // 10_000 bps pool, so the cap for visible percentage beneficiaries
+                // is `10_000 - hashed_bps`, not simply `10_000`. Without this
+                // adjustment the redistributed visible total would exceed the
+                // available headroom and the combined allocation would surpass
+                // 100%, distorting payouts when a hashed beneficiary later
+                // calls `reveal_and_claim`.
+                let hashed_bps = unclaimed_hashed_bps(&will.hashed_beneficiaries);
+                let max_visible_bps = 10_000u32.saturating_sub(hashed_bps);
                 let target_total: u32 = remaining_basis_points
                     .saturating_add(renounced_basis_points)
-                    .min(10_000);
+                    .min(max_visible_bps);
 
                 let mut percentage_total: u32 = 0;
                 for b in new_beneficiaries.iter() {
@@ -1884,7 +1902,9 @@ impl WillContract {
                 }
 
                 // Hard cap, independent of `assert_valid_allocations` below.
-                if running_total > 10_000 {
+                // Uses the same `max_visible_bps` ceiling applied to
+                // `target_total` above (#12).
+                if running_total > max_visible_bps {
                     panic_with_error!(&env, WillError::InvalidPercentages);
                 }
 
@@ -1927,12 +1947,16 @@ impl WillContract {
         // Update indexes: remove the renouncing beneficiary from the reverse index
         storage::remove_beneficiary_index(&env, &beneficiary, will_id);
 
-        // Validate the redistributed beneficiary allocations
+        // Validate the redistributed beneficiary allocations.
         assert_valid_allocations(
             &env,
             &will.beneficiaries,
             primary_token_balance(&will.balances, &will.token),
         );
+        // #12: also validate the combined visible + hashed constraint so that
+        // the redistributed visible percentage total never exceeds the headroom
+        // left after hashed beneficiaries' committed shares are accounted for.
+        assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
         // Get the owner for event emission (not changed)
         let owner = will.owner.clone();
@@ -5725,18 +5749,42 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         }
 
         // A will with only `FixedAmount` beneficiaries has no percentage
-        // beneficiary to absorb the leftover (e.g. after a `top_up`). Give it
-        // to the final beneficiary instead of leaving it stranded in the
-        // contract once the balances map is cleared (#456).
-        if percentage_count == 0 && remaining > 0 && !shares.is_empty() {
-            let last = shares.len() - 1;
-            let (addr, share) = shares.get(last).unwrap();
-            shares.set(last, (addr, share + remaining));
+        // beneficiary to absorb the leftover (e.g. after a `top_up`). The
+        // remainder of *every* token is refunded to the will's owner (#383,
+        // documented in this function's "Leftover value" section) rather than
+        // being added to the final fixed-amount beneficiary's share: fixed
+        // allocations express the testator's exact intended amounts, and any
+        // excess was never allocated to anyone.
+        //
+        // This also resolves the double-allocation bug (#10): an earlier
+        // revision added `remaining` to `shares[last]` *and* queued the same
+        // amount in `refund_plan`, so a FixedAmount-only will with excess
+        // balance planned `total + remaining` tokens — panicking with
+        // `DistributionMismatch` or insolvently over-drawing the contract.
+        // The remainder is now queued exactly once, and only here.
+        //
+        // The refund is queued *before* the conservation check below so that
+        // `planned` can include it (#11): for a secondary token (fixed
+        // amounts are denominated in the primary token only, #384) `shares`
+        // is empty, and without the refund counted in `planned` the check
+        // could never reach `total` — it would panic and lock the whole
+        // estate in the contract forever.
+        let mut refund_amount: i128 = 0;
+        if percentage_count == 0 && remaining > 0 {
+            refund_amount = remaining;
+            refund_plan.push_back((token_addr.clone(), remaining));
         }
 
-        // Conservation check (#456): the planned payouts for this token must
-        // account for exactly its balance. Anything else means funds would be
-        // silently lost in, or over-drawn from, the contract.
+        // Conservation check: the planned payouts for this token must account
+        // for exactly its balance. Anything else means funds would be silently
+        // lost in, or over-drawn from, the contract. Owner-refund amounts are
+        // included via `refund_amount` so secondary-token balances satisfy the
+        // check without having any entries in `shares` (#11). The hashed
+        // reserve is also included: those tokens are not transferred to
+        // beneficiaries here but they are accounted for — they remain in
+        // `will.balances` (via `hashed_reserves`) for `reveal_and_claim` to
+        // draw from, so the full token balance is preserved across all paths.
+        let local_hashed_reserve = hashed_reserves.get(token_addr.clone()).unwrap_or(0);
         let mut planned: i128 = token_bounty;
         for (_, share) in shares.iter() {
             if share < 0 {
@@ -5747,16 +5795,16 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                 None => panic_with_error!(env, WillError::DistributionMismatch),
             };
         }
+        planned = match planned.checked_add(refund_amount) {
+            Some(v) => v,
+            None => panic_with_error!(env, WillError::DistributionMismatch),
+        };
+        planned = match planned.checked_add(local_hashed_reserve) {
+            Some(v) => v,
+            None => panic_with_error!(env, WillError::DistributionMismatch),
+        };
         if planned != total {
             panic_with_error!(env, WillError::DistributionMismatch);
-        }
-
-        // With no percentage beneficiaries there is nobody left to absorb what
-        // the fixed amounts did not claim. Refunding it to the owner keeps the
-        // tokens from being stranded in the contract with no accounting and no
-        // withdrawal path once the will is `Released` (#383).
-        if percentage_count == 0 && remaining > 0 {
-            refund_plan.push_back((token_addr.clone(), remaining));
         }
 
         transfer_plan.push_back((token_addr, shares));
