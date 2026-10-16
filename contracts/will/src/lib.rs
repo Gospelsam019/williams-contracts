@@ -102,6 +102,10 @@ mod test_support;
 #[cfg(test)]
 mod triggered_wills_test;
 
+/// Tests for issues #21, #22, #23, and #24.
+#[cfg(test)]
+mod issues_21_22_23_24_test;
+
 /// Guarded-release and cooldown regression tests for guardian voting.
 #[cfg(test)]
 mod guardian_cancel_test;
@@ -1114,6 +1118,7 @@ impl WillContract {
         will.last_checkin = now;
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
+        storage::bump_instance_ttl(&env);
 
         // Refresh the owner index TTL on every check-in so that an account
         // inactive for longer than BUMP_AMOUNT ledgers (roughly 60 days) does
@@ -1208,6 +1213,7 @@ impl WillContract {
         }
 
         events::batch_checkin(&env, &owner, &will_ids, count);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Starts the grace period for `will_id` once the check-in deadline has
@@ -1274,6 +1280,7 @@ impl WillContract {
         );
 
         events::will_triggered(&env, will_id, grace_period_ends);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Cancels an in-progress trigger during the grace period, proving the
@@ -1341,6 +1348,7 @@ impl WillContract {
 
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Distributes all token balances to beneficiaries proportionally to
@@ -1474,6 +1482,7 @@ impl WillContract {
         assert_release_preconditions(&env, will_id, &will);
 
         distribute(&env, &mut will, &caller);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Delivers a payout that failed during a previous `distribute` call
@@ -2406,6 +2415,7 @@ impl WillContract {
         token::Client::new(&env, &token).transfer(&owner, &env.current_contract_address(), &amount);
 
         events::top_up(&env, will_id, &owner, &token, amount, new_balance);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Returns the contract version as a `u32` encoded semver value:
@@ -2630,6 +2640,18 @@ impl WillContract {
         };
         storage::save_protocol_stats(&env, &repaired);
         repaired
+    }
+
+    /// Recomputes a bounded chunk of protocol statistics (#24).
+    ///
+    /// Reads at most `batch_size` wills starting from `start_id`.
+    /// Returns `(chunk_stats, next_start_id, done)`.
+    pub fn recompute_protocol_stats_chunk(
+        env: Env,
+        start_id: u64,
+        batch_size: u32,
+    ) -> (ProtocolStats, u64, bool) {
+        storage::recompute_protocol_stats_chunk(&env, start_id, batch_size)
     }
 
     /// Returns the list of will ids currently in `Triggered` status.
@@ -4254,6 +4276,34 @@ impl WillContract {
             env.ledger().timestamp(),
             reason,
         );
+    }
+
+    /// Returns the archived will record for `will_id`.
+    ///
+    /// Archived wills are stored under [`storage::DataKey::ArchivedWill`] with a
+    /// managed persistent storage TTL. This entrypoint allows callers to inspect
+    /// historical wills for audit purposes before ledger pruning.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no archived will exists with this id.
+    pub fn get_archived_will(env: Env, will_id: u64) -> Will {
+        match storage::load_archived_will(&env, will_id) {
+            Ok(will) => will,
+            Err(err) => panic_with_error!(&env, err),
+        }
+    }
+
+    /// Extends the persistent storage TTL of an archived will record.
+    ///
+    /// Callable by anyone to keep an archived will entry alive in persistent storage
+    /// and prevent it from being pruned by the Soroban ledger archival system.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no archived will exists with this id.
+    pub fn extend_archived_will_ttl(env: Env, will_id: u64) {
+        if let Err(err) = storage::extend_archived_will_ttl(&env, will_id) {
+            panic_with_error!(&env, err);
+        }
     }
 
     // -----------------------------------------------------------------------

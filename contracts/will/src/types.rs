@@ -175,6 +175,13 @@ pub struct TokenLockedBalance {
 /// every storage write it made, so a failed operation cannot be counted
 /// on-chain. Failure rates must be measured off-chain from transaction
 /// results.
+///
+/// # Discrete bounded storage architecture (Issue #22)
+///
+/// On-chain locked totals are stored in individual storage entries under
+/// `DataKey::TotalLocked(Address)`, decoupling per-token balance updates from
+/// vector-scanning overhead. `total_locked_by_token` is assembled at query
+/// time for backward-compatible off-chain reporting.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolStats {

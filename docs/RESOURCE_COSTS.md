@@ -358,14 +358,15 @@ fn profile_create_will_token_scaling(report: &mut Report) {
 See [`docs/adr/0002-total-locked-by-token-scalability.md`](adr/0002-total-locked-by-token-scalability.md)
 for the full analysis, options considered, and recommended fix.
 
-## An observation, not addressed here
+## Contract instance storage TTL renewal (Resolved — Issue #21)
 
-Nothing in the contract renews its own instance entry. A contract instance is
-written once at deployment with a short default lifetime, and if it archives,
-every call fails until someone restores it. Most contracts call
-`env.storage().instance().extend_ttl(...)` in their entry points to prevent
-this. The profile has to renew the instance from the test side to make its
-long-jump scenarios work at all, which is how this surfaced.
+Previously, nothing in the contract renewed its own instance entry outside of
+`next_will_id`. If a deployment experienced an extended period with no new wills
+created, the contract instance could expire and archive, causing subsequent calls
+to revert until restored.
 
-Adding those bumps would *increase* per-call cost, so it does not belong in a
-pass about reducing it — but it is a liveness question worth a separate look.
+This has been resolved: `env.storage().instance().extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT)`
+is now invoked across high-frequency state-mutating entrypoints (`check_in`,
+`batch_check_in`, `top_up`, `trigger_will`) and key lifecycle operations
+(`emergency_checkin`, `release_inheritance`). Active wills now keep the parent
+contract instance alive without requiring external restoration.
