@@ -130,6 +130,8 @@ mod issue_354_test;
 #[cfg(test)]
 mod issue_356_test;
 #[cfg(test)]
+mod reset_guardian_consent_test;
+#[cfg(test)]
 // mod issue_357_test; // TODO: ContractEvents API changed in soroban-sdk v28
 /// Regression tests for issues #358-#361: the distinct-token cap in `top_up`,
 /// the shared guardian-vote expiry rule, `limit == 0` pagination parity in
@@ -2258,9 +2260,11 @@ impl WillContract {
 
         // Reset last_checkin to now so the new periods apply from this moment,
         // preventing retroactive expiration if the owner reduces the period below
-        // the already elapsed time (#15).
+        // the already elapsed time (#15, #33).
         will.last_checkin = now;
-        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
+        let period_seconds = checked_days_to_seconds(&env, will.checkin_period_days);
+        let calculated_deadline = checked_add_timestamp(&env, now, period_seconds);
+        let next_deadline = core::cmp::max(calculated_deadline, checked_add_timestamp(&env, now, 1));
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2559,8 +2563,10 @@ impl WillContract {
     /// - `Triggered`: seconds until the grace period expires
     ///   (`trigger_time + grace_period_days`, where `trigger_time` is the
     ///   missed check-in deadline — see [`Self::trigger_will`]).
-    /// - `PendingConfirmation`, `Released`, `Cancelled`, `Settled`: no deadline
-    ///   applies; returns `None`.
+    /// - `PendingConfirmation`: seconds until `confirmation_deadline`
+    ///   expires; negative if the deadline has passed (#34). If
+    ///   `confirmation_deadline` is `None`, returns `None`.
+    /// - `Released`, `Cancelled`, `Settled`: no deadline applies; returns `None`.
     ///
     /// The returned value is negative when the deadline has already passed
     /// (e.g. an `Active` will whose check-in deadline elapsed but which has
@@ -2605,8 +2611,8 @@ impl WillContract {
                 let deadline = checked_deadline_as_i64(&env, trigger_time, will.grace_period_days);
                 Some(deadline - now)
             }
-            WillStatus::PendingConfirmation
-            | WillStatus::Released
+            WillStatus::PendingConfirmation => will.confirmation_deadline.map(|dl| (dl as i64) - now),
+            WillStatus::Released
             | WillStatus::Cancelled
             | WillStatus::Settled => None,
         }
@@ -3144,23 +3150,9 @@ impl WillContract {
         // expired votes drop out (#458). A running `+= 1` would let a guardian
         // whose earlier vote expired be counted twice.
         storage::set_guardian_voted(&env, will_id, &guardian, now, reason);
-        let (tally_weight, tally_count) =
-            storage::tally_guardian_votes(&env, &will, now, expiry_days);
-        will.guardian_vote_weight = tally_weight;
-        will.guardian_votes = tally_count;
-        // Recount from the current guardian list instead of incrementing a
-        // running total (#453), so votes from removed, rejected or expired
-        // guardians can never count toward the threshold.
-        let (votes, vote_weight) =
-            tally_guardian_votes(&env, &will, now, storage::has_guardian_voted);
-        will.guardian_votes = votes;
-        will.guardian_vote_weight = vote_weight;
-        // Recount from the vote records that are still live rather than adding
-        // to the persisted counters: a record that has already aged past the
-        // expiry window no longer counts, so voting again after expiry replaces
-        // the old vote rather than stacking on top of it (#372). Without this a
-        // single guardian could vote once per grace period and reach the
-        // threshold alone.
+        // Authoritative recount in a single pass (#35): recount from the vote
+        // records that are still live rather than adding to persisted counters (#372),
+        // counting only current consented guardians (#453).
         let (live_weight, live_votes) =
             storage::recount_guardian_votes(&env, &will, now, expiry_days);
         will.guardian_vote_weight = live_weight;
@@ -3272,18 +3264,9 @@ impl WillContract {
         }
 
         storage::set_guardian_cancel_voted(&env, will_id, &guardian, now);
-        let (tally_weight, tally_count) =
-            storage::tally_guardian_cancel_votes(&env, &will, now, expiry_days);
-        will.guardian_cancel_vote_weight = tally_weight;
-        will.guardian_cancel_votes = tally_count;
-        // Recount from the current guardian list (#453); see `guardian_trigger`.
-        let (votes, vote_weight) =
-            tally_guardian_votes(&env, &will, now, storage::has_guardian_cancel_voted);
-        will.guardian_cancel_votes = votes;
-        will.guardian_cancel_vote_weight = vote_weight;
-        // Same recount-from-live-records rule as `guardian_trigger`: an expired
-        // cancel vote is replaced, not accumulated, so one guardian cannot reach
-        // the cancel threshold alone by voting once per grace period (#372).
+        // Authoritative recount in a single pass (#35): recount from the cancel-vote
+        // records that are still live rather than adding to persisted counters (#372),
+        // counting only current consented guardians (#453).
         let (live_weight, live_votes) =
             storage::recount_guardian_cancel_votes(&env, &will, now, expiry_days);
         will.guardian_cancel_vote_weight = live_weight;
@@ -3478,6 +3461,52 @@ impl WillContract {
         events::guardian_rejected_role(&env, will_id, &guardian);
     }
 
+    /// Resets a specific guardian's consent status from `Rejected` back to `Pending`.
+    ///
+    /// Callable by the will's owner while the will is not in a terminal status.
+    /// This allows a guardian who accidentally rejected their role to re-accept it
+    /// without requiring the owner to replace the entire guardian list (which would
+    /// wipe all existing consents and restart the guardian cooldown) (#36).
+    ///
+    /// Accepted guardians retain their consent and vote eligibility.
+    /// The guardian list cooldown timestamp is not modified.
+    ///
+    /// # Panics
+    /// - [`WillError::NotGuardian`] if `guardian` is not named on this will.
+    /// - [`WillError::WillNotActive`] if the will is in a terminal status
+    ///   (`Released`, `Cancelled` or `Settled`).
+    pub fn reset_guardian_consent(env: Env, will_id: u64, guardian: Address) {
+        let mut will = load_will(&env, will_id);
+        will.owner.require_auth();
+        assert_consent_changeable(&env, &will);
+
+        let mut found = false;
+        let mut updated_guardians: Vec<Guardian> = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if g.address == guardian {
+                found = true;
+                if g.consent == GuardianConsent::Rejected {
+                    updated_guardians.push_back(Guardian {
+                        address: g.address.clone(),
+                        weight: g.weight,
+                        consent: GuardianConsent::Pending,
+                    });
+                } else {
+                    return;
+                }
+            } else {
+                updated_guardians.push_back(g.clone());
+            }
+        }
+
+        if !found {
+            panic_with_error!(&env, WillError::NotGuardian);
+        }
+
+        will.guardians = updated_guardians;
+        storage::save_will(&env, &will);
+    }
+
     // ── #21: Will cloning / templates ────────────────────────────────────
 
     /// Clones an existing will's configuration into a new will with fresh
@@ -3631,7 +3660,7 @@ impl WillContract {
             trigger_time: None,
             confirmation_deadline: None,
             status: WillStatus::Active,
-            guardians: reset_guardian_consent(&env, &source.guardians),
+            guardians: reset_all_guardians_consent(&env, &source.guardians),
             guardian_vote_weight: 0,
             guardian_votes: 0,
             guardian_cancel_vote_weight: 0,
@@ -4623,7 +4652,7 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &b.address, new_id);
         }
 
-        let child_guardians = reset_guardian_consent(&env, &source.guardians);
+        let child_guardians = reset_all_guardians_consent(&env, &source.guardians);
         // Unmodified guardian lists on child wills inherit source cooldown timestamps (#37).
         // Only set `now` if the guardian list was altered during the split.
         let guardian_list_unmodified = child_guardians.len() == source.guardians.len()
@@ -5641,30 +5670,6 @@ fn grace_deadline(env: &Env, will: &Will) -> u64 {
 ///
 /// `has_voted` selects the namespace: [`storage::has_guardian_voted`] for
 /// release votes or [`storage::has_guardian_cancel_voted`] for cancel votes.
-///
-/// Recomputing the tally on every vote, rather than keeping a running total,
-/// enforces the upper bound from issue #453. A guardian who has been removed,
-/// has rejected the role or whose vote has expired can never count toward the
-/// threshold, and the count can never exceed the number of guardians on the
-/// will.
-fn tally_guardian_votes(
-    env: &Env,
-    will: &Will,
-    now: u64,
-    has_voted: fn(&Env, u64, &Address, u64, u64) -> bool,
-) -> (u32, u32) {
-    let mut votes: u32 = 0;
-    let mut weight: u32 = 0;
-    for g in will.guardians.iter() {
-        if g.consent == GuardianConsent::Accepted
-            && has_voted(env, will.id, &g.address, now, will.grace_period_days)
-        {
-            votes += 1;
-            weight = weight.saturating_add(g.weight);
-        }
-    }
-    (votes, weight)
-}
 
 /// Asserts both periods are at least one day and at most [`MAX_PERIOD_DAYS`].
 ///
@@ -6166,7 +6171,7 @@ fn more_advanced_consent(a: GuardianConsent, b: GuardianConsent) -> GuardianCons
 /// never agreed to, so consent recorded on the source must not carry over
 /// (#375) — a guardian has to be asked about the child before they can vote
 /// on it, exactly as on a freshly created will.
-fn reset_guardian_consent(env: &Env, guardians: &Vec<Guardian>) -> Vec<Guardian> {
+fn reset_all_guardians_consent(env: &Env, guardians: &Vec<Guardian>) -> Vec<Guardian> {
     let mut reset: Vec<Guardian> = Vec::new(env);
     for g in guardians.iter() {
         reset.push_back(Guardian {

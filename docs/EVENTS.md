@@ -55,6 +55,19 @@ returns `WillNotFound` and the will no longer shows up in `get_wills_by_owner`,
 
 Indexers should treat this as the will's final lifecycle event.
 
+## `periodu`
+
+`update_periods` publishes this event whenever the owner updates a will's check-in or
+grace periods. Because `update_periods` resets `last_checkin` to the current transaction
+timestamp (`now`), `next_deadline` is always a valid future deadline computed as
+`now + checkin_period_days * 86_400`. Off-chain indexers and user interfaces are guaranteed
+never to receive a stale or historical timestamp.
+
+- `owner`: the will's owner.
+- `checkin_period_days`: updated check-in period in days.
+- `grace_period_days`: updated grace period in days.
+- `next_deadline`: ledger timestamp (Unix seconds) for the next check-in deadline (`now + checkin_period_days * 86_400`), guaranteed to be strictly in the future.
+
 ## Failed operations
 
 A failed invocation rolls back all of its storage writes and events, so no

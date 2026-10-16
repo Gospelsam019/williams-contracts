@@ -1,9 +1,10 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    symbol_short,
+    testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    vec, Address, Env, Vec as SorobanVec,
+    vec, Address, Env, TryIntoVal, Vec as SorobanVec,
 };
 
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillStatus};
@@ -469,3 +470,54 @@ fn update_will_settings_guardian_change_clears_cancel_vote_state() {
     );
     assert_eq!(after_new_vote.guardian_cancel_vote_weight, 1);
 }
+
+#[test]
+fn test_update_periods_emits_valid_future_deadline_event() {
+    let (env, client, owner, token_address) = setup();
+
+    let will_id = create_active_will(&env, &client, &owner, &token_address);
+
+    // Advance time by 40 days
+    env.ledger().with_mut(|l| l.timestamp += 40 * DAY);
+    let now_before_update = env.ledger().timestamp();
+
+    // Shorten checkin period to 10 days, grace to 5 days
+    client.update_periods(&will_id, &owner, &Some(10), &Some(5));
+
+    let all_events = env.events().all();
+    let events = all_events.events();
+    let mut found = false;
+    for event in events.iter() {
+        let soroban_sdk::xdr::ContractEventBody::V0(v0) = &event.body;
+        if v0.topics.len() < 2 {
+            continue;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = v0.topics[0].clone().try_into_val(&env);
+        if topic0 != Ok(symbol_short!("periodu")) {
+            continue;
+        }
+        let topic1_val: soroban_sdk::Val = match v0.topics[1].clone().try_into_val(&env) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let topic1: Result<u64, _> = topic1_val.try_into_val(&env);
+        if topic1 != Ok(will_id) {
+            continue;
+        }
+
+        found = true;
+        let data_val: soroban_sdk::Val = v0.data.clone().try_into_val(&env).unwrap();
+        let data: (Address, u64, u64, u64) = data_val.try_into_val(&env).unwrap();
+        assert_eq!(data.0, owner);
+        assert_eq!(data.1, 10);
+        assert_eq!(data.2, 5);
+        let next_deadline = data.3;
+        assert!(
+            next_deadline > now_before_update,
+            "next_deadline must be strictly in the future"
+        );
+        assert_eq!(next_deadline, now_before_update + 10 * DAY);
+    }
+    assert!(found, "periodu event must be emitted");
+}
+

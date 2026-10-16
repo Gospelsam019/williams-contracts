@@ -190,7 +190,7 @@ fn test_get_time_until_deadline_triggered_will_negative_after_grace_expires() {
 }
 
 #[test]
-fn test_get_time_until_deadline_pending_confirmation_returns_none() {
+fn test_get_time_until_deadline_pending_confirmation() {
     let (env, client, owner, token_address) = setup();
 
     let beneficiary = Address::generate(&env);
@@ -215,11 +215,27 @@ fn test_get_time_until_deadline_pending_confirmation_returns_none() {
         &3600,
     );
 
-    // Don't confirm the will - it's in PendingConfirmation status
+    // Will is in PendingConfirmation status: deadline is 3600 seconds away
     let time_until_deadline = client.get_time_until_deadline(&will_id);
-    assert!(
-        time_until_deadline.is_none(),
-        "PendingConfirmation status should return None"
+    assert_eq!(
+        time_until_deadline,
+        Some(3600),
+        "PendingConfirmation status should return remaining seconds until confirmation deadline"
+    );
+
+    // Advance 1800 seconds
+    env.ledger().with_mut(|l| l.timestamp += 1800);
+    assert_eq!(
+        client.get_time_until_deadline(&will_id),
+        Some(1800)
+    );
+
+    // Advance past the confirmation deadline (another 2000 seconds -> 200 seconds past due)
+    env.ledger().with_mut(|l| l.timestamp += 2000);
+    assert_eq!(
+        client.get_time_until_deadline(&will_id),
+        Some(-200),
+        "Lapsed confirmation deadline should return negative seconds"
     );
 }
 
