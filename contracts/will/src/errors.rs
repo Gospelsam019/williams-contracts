@@ -225,4 +225,8 @@ pub enum WillError {
     /// would wipe those votes and let a fresh trigger bypass a cancel that was
     /// accumulating against it, so the update is refused (#488).
     GuardianCancelInProgress = 53,
+    /// `refund_unconfirmed_will` was called before the confirmation deadline
+    /// plus grace margin had elapsed (#40).
+    ConfirmationWindowNotExpired = 54,
 }
+

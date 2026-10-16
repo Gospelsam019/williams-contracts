@@ -108,3 +108,40 @@ picked up, would extend this ADR's reasoning by:
 Until issue #6 is implemented, `MAX_GUARDIANS = 3` remains the enforced
 ceiling, and this ADR is the record of why that number — and the 2-of-3
 default built on top of it — was chosen.
+
+## Guardian Vote Reasons and Trustless Consensus Model
+
+Each guardian who calls `guardian_trigger` supplies a `GuardianVoteReason`
+(`Deceased`, `Incapacitated`, `Unreachable`, or `Other`). This value is
+stored in `GuardianVoteRecord` and emitted in events.
+
+### Informational Metadata vs. On-Chain Consensus
+
+As recorded in this ADR and issue #38, `GuardianVoteReason` is purely
+**informational metadata**; the contract enforces **no on-chain consensus**
+over reasons among voting guardians. For instance, Guardian A may vote
+`Deceased` while Guardian B votes `Incapacitated`. Once the threshold of
+votes is met, the will triggers and releases immediately regardless of the
+differing reasons.
+
+This design was chosen deliberately:
+1. **Subjective reality arbitration**: A smart contract cannot arbitrate
+   competing factual claims regarding an owner's physical condition.
+2. **Deadlock prevention**: Requiring strict consensus on reasons would risk
+   deadlocking the trigger in emergencies if guardians disagree on the exact
+   classification (e.g. whether an uncontactable, medically critical owner
+   is classified as `Incapacitated` or `Unreachable`).
+
+### Off-Chain Auditing Patterns
+
+Because on-chain consensus is not enforced, off-chain consumers, indexers,
+and legal executors must not treat a triggered status as proof of universal
+guardian consensus on the reason.
+
+Recommended off-chain auditing patterns include:
+- **Multi-reason query**: Indexers can call `get_guardian_votes(will_id)` to
+  retrieve all active guardian votes and their associated reasons in a single
+  call, or inspect per-guardian records via `get_guardian_vote_status`.
+- **Discrepancy detection**: Indexers and legal workflows should inspect all
+  cast reasons and flag conflicting reasons (e.g. `Deceased` vs `Other`) for
+  manual verification or off-chain dispute resolution.

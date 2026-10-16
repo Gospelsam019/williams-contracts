@@ -27,6 +27,14 @@ Williams is a trustless, on-chain inheritance protocol for Stellar Soroban. It l
 7. **Update beneficiaries.** While active, the owner can call `update_beneficiaries` to change who inherits and in what proportions.
 8. **Guardian override.** A will can name up to 3 guardians. Once the will's guardian threshold is reached (2 by default, configurable per will), their `guardian_trigger` calls force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive. See [docs/adr/0001-guardian-threshold.md](./docs/adr/0001-guardian-threshold.md) for the rationale behind the 2-of-3 default, its known limitations, and how it relates to the proposed configurable M-of-N guardian feature.
 
+### Supported Tokens & Fee-on-Transfer Warning
+
+Williams requires standard **SEP-41 compliant tokens** without transfer fees (`balance_transferred == amount`).
+
+> [!WARNING]
+> **Fee-on-transfer, deflationary, and rebasing tokens are strictly unsupported.**
+> The contract assumes that a transfer of `amount` increases its balance by exactly `amount`. If a token charges a transfer tax or burns tokens on transfer, the contract receives less than the amount tracked in its internal balances. At release or cancellation time, payout transactions will fail due to balance shortfalls (e.g. `DistributionMismatch` or contract insolvency), trapping funds. Do not deposit non-standard or fee-bearing tokens.
+
 ## Tech Stack
 
 - **Rust** 1.84+
