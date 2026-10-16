@@ -2,7 +2,9 @@
 
 ## Status
 
-Open — fix not yet implemented.
+Accepted and Implemented (Issue #22).
+
+Per-token locked totals are refactored into discrete storage entries (`DataKey::TotalLocked(Address)`), keeping per-transaction read/write footprint and gas consumption constant across distinct protocol tokens.
 
 ## Context
 

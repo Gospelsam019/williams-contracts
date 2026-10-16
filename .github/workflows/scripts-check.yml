@@ -33,3 +33,24 @@ jobs:
 
       - name: Run shellcheck
         run: shellcheck scripts/*.sh
+
+  spec-freshness:
+    # Runs scripts/export-spec.sh --check to verify that the committed JSON
+    # snapshot in spec/ matches the compiled WASM bindings (#49). Any PR that
+    # changes entry point signatures, error codes, or struct fields without
+    # updating the spec will fail here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust wasm32v1-none target
+        run: rustup target add wasm32v1-none
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+
+      - name: Build contract and verify spec freshness
+        run: scripts/export-spec.sh --check

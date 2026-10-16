@@ -102,6 +102,10 @@ mod test_support;
 #[cfg(test)]
 mod triggered_wills_test;
 
+/// Tests for issues #21, #22, #23, and #24.
+#[cfg(test)]
+mod issues_21_22_23_24_test;
+
 /// Guarded-release and cooldown regression tests for guardian voting.
 #[cfg(test)]
 mod guardian_cancel_test;
@@ -121,11 +125,11 @@ mod distribute_overflow_safety_test;
 mod issue_183_test;
 #[cfg(test)]
 mod issue_354_test;
-// #[cfg(test)]
+#[cfg(test)]
 // mod issue_355_test; // TODO: ContractEvents API changed in soroban-sdk v28
 #[cfg(test)]
 mod issue_356_test;
-// #[cfg(test)]
+#[cfg(test)]
 // mod issue_357_test; // TODO: ContractEvents API changed in soroban-sdk v28
 /// Regression tests for issues #358-#361: the distinct-token cap in `top_up`,
 /// the shared guardian-vote expiry rule, `limit == 0` pagination parity in
@@ -192,12 +196,18 @@ mod issue_499_test;
 #[cfg(test)]
 mod issue_500_test;
 
+/// Regression test for issue #41: `OwnerWills` reverse index TTL is refreshed
+/// during `check_in`, `trigger_will`, and `get_wills_by_owner` so that long
+/// owner inactivity does not silently expire the index and strand will ids.
+#[cfg(test)]
+mod issue_41_test;
+
 /// Regression test for issue #184: `merge_wills` refuses mismatched primary tokens.
 #[cfg(test)]
 mod issue_184_test;
 
 /// Regression test for issue #185: `add_hashed_beneficiary` emits its lifecycle event.
-// #[cfg(test)]
+#[cfg(test)]
 // mod issue_185_test; // TODO: ContractEvents API changed in soroban-sdk v28
 
 /// Regression test for issue #186: hashed-beneficiary percentages must use the
@@ -244,6 +254,13 @@ mod issue_299_test;
 #[cfg(test)]
 mod issue_350_353_test;
 
+/// Regression tests for issues #5-#8: `cancel_will` and `release_inheritance`
+/// each decremented the protocol locked totals twice, `split_will` incremented
+/// the active-will counter twice, and `archive_will` rejected `Settled` wills
+/// so closed wills could never be archived.
+#[cfg(test)]
+mod issue_5_8_test;
+
 /// Regression test: `has_guardian_voted` / `has_guardian_cancel_voted` use a
 /// checked elapsed-time subtraction and cannot underflow when `now` precedes
 /// the recorded vote timestamp.
@@ -289,10 +306,27 @@ mod get_will_status_test;
 mod get_wills_test;
 #[cfg(test)]
 mod hashed_beneficiary_test;
+/// Regression tests for issue #109: keeper-bounty token selection — the
+/// default proportional split across every held token, the owner-targeted
+/// single-token mode (with proportional fallback), and the v1 → v2 storage
+/// migration that added `Will::keeper_bounty_token`.
+#[cfg(test)]
+mod issue_109_test;
 #[cfg(test)]
 mod issue_259_test;
 #[cfg(test)]
 mod issue_260_test;
+/// Regression test for issue #51: `clone_will` validates owner and beneficiary
+/// index capacities before executing any token transfer, mirroring the
+/// Checks-Effects-Interactions order already enforced by `create_will`.
+#[cfg(test)]
+mod issue_51_test;
+/// Regression tests for issue #52: `clone_will` now deep-copies hashed
+/// beneficiary slots from the source will (resetting claimed flags) instead of
+/// dropping them, so the cloned will's visible + hashed basis points continue
+/// to satisfy the 10,000 bps invariant.
+#[cfg(test)]
+mod issue_52_test;
 #[cfg(test)]
 mod issue_261_test;
 #[cfg(test)]
@@ -355,7 +389,23 @@ mod set_delegate_test;
 #[cfg(test)]
 mod split_will_test;
 #[cfg(test)]
+/// Regression tests for issues #57, #58, #59, and #60: mixed visible/hashed
+/// percentage beneficiaries, split_will rejection on hashed-beneficiary wills,
+/// seq-based pagination cursor for get_will_history_page, and
+/// check_resource_costs.sh graceful handling of the disabled profile module.
+mod issue_57_58_59_60_test;
+#[cfg(test)]
 mod issue_490_493_test;
+
+/// Comprehensive negative authorization tests asserting that every entry point
+/// rejects unauthorized callers with the exact declared WillError code.
+#[cfg(test)]
+mod authorization_negative_test;
+
+/// Proptest state-machine tests asserting that terminal will states
+/// (Released, Cancelled, Settled) are strictly absorbing.
+#[cfg(test)]
+mod state_machine_test;
 // NOTE: `test.rs` (5800+ lines) is intentionally NOT wired in here. It
 // predates the current multi-token/Allocation-enum contract API entirely
 // (it exclusively uses a removed single-token `basis_points` signature) and
@@ -373,6 +423,14 @@ mod update_will_settings_test;
 mod wills_by_owner_status_test;
 // #[cfg(test)]
 // mod issue_486_489_test; // TODO: ContractEvents API
+#[cfg(test)]
+mod issue_10_test;
+#[cfg(test)]
+mod issue_11_test;
+#[cfg(test)]
+mod issue_12_test;
+#[cfg(test)]
+mod issue_9_test;
 
 use soroban_sdk::{
     contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address,
@@ -512,6 +570,10 @@ const BATCH_MAX: u32 = 10;
 /// before attempting something malicious.
 const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
 
+/// Grace margin in days after the confirmation window expires before
+/// `refund_unconfirmed_will` can be called to return trapped funds (#40).
+pub const UNCONFIRMED_WILL_REFUND_GRACE_DAYS: u64 = 7;
+
 /// Maximum keeper bounty in basis points (100 bps = 1%).
 const MAX_KEEPER_BOUNTY_BPS: u32 = 100;
 
@@ -590,7 +652,11 @@ impl WillContract {
     ///   guardian mechanism is disabled without guardians, so any value would
     ///   describe an unreachable quorum (#363). When the list is non-empty the
     ///   value must be between 1 and `guardians.len()`.
-    /// - `keeper_bounty_bps`: optional keeper bounty in basis points.
+    /// - `keeper_bounty_bps`: optional keeper bounty in basis points. Unless
+    ///   the owner later targets a specific token through
+    ///   [`set_keeper_bounty_token`](WillContract::set_keeper_bounty_token),
+    ///   the bounty is deducted proportionally from every token the will
+    ///   holds (#109).
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -798,6 +864,7 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &beneficiaries,
+            &Vec::new(&env),
             primary_token_balance(&balances, &primary_token),
         );
 
@@ -852,6 +919,7 @@ impl WillContract {
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: keeper_bounty,
+            keeper_bounty_token: None,
             delegate: None,
         };
         storage::save_will(&env, &will);
@@ -883,7 +951,7 @@ impl WillContract {
             &owner,
             token_count,
             &will.beneficiaries,
-            now + checkin_period_days * SECONDS_PER_DAY,
+            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, checkin_period_days)),
         );
 
         will_id
@@ -943,7 +1011,7 @@ impl WillContract {
         if will.beneficiaries.is_empty() || will.beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
-        assert_valid_allocations(&env, &will.beneficiaries, total_balance(&will.balances));
+        assert_valid_allocations(&env, &will.beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
         assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
         will.status = WillStatus::Active;
@@ -963,6 +1031,85 @@ impl WillContract {
         );
 
         events::will_confirmed(&env, will_id, &owner);
+    }
+
+    /// Triggers an automated clawback/refund for an unconfirmed will (#40).
+    ///
+    /// When a will is created with a confirmation delay, the contract takes
+    /// custody of tokens immediately. If the confirmation deadline passes
+    /// without confirmation or cancellation, the tokens would otherwise remain
+    /// trapped indefinitely in contract custody.
+    ///
+    /// This function is **permissionless** and can be called by anyone once
+    /// `now > confirmation_deadline + 7 days` (the grace margin). It safely
+    /// returns all custodied tokens back to `will.owner`, cleans up storage
+    /// indices, and transitions the will's status to [`WillStatus::Cancelled`].
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if `will_id` does not exist.
+    /// - [`WillError::WillNotConfirmed`] if the will is not in
+    ///   [`WillStatus::PendingConfirmation`] status.
+    /// - [`WillError::ConfirmationWindowExpired`] if the will does not have a
+    ///   confirmation deadline set.
+    /// - [`WillError::ConfirmationWindowNotExpired`] if called before the
+    ///   confirmation deadline plus the 7-day grace margin has elapsed.
+    pub fn refund_unconfirmed_will(env: Env, will_id: u64) {
+        let mut will = load_will(&env, will_id);
+
+        if will.status != WillStatus::PendingConfirmation {
+            panic_with_error!(&env, WillError::WillNotConfirmed);
+        }
+
+        let deadline = match will.confirmation_deadline {
+            Some(d) => d,
+            None => panic_with_error!(&env, WillError::ConfirmationWindowExpired),
+        };
+
+        let now = env.ledger().timestamp();
+        let grace_margin = UNCONFIRMED_WILL_REFUND_GRACE_DAYS * SECONDS_PER_DAY;
+        if now <= deadline.saturating_add(grace_margin) {
+            panic_with_error!(&env, WillError::ConfirmationWindowNotExpired);
+        }
+
+        let owner = will.owner.clone();
+        let contract_address = env.current_contract_address();
+        let token_count = will.balances.len();
+        let balances_snapshot = will.balances.clone();
+        let prior_status = will.status;
+
+        // --- EFFECTS: mutate state and persist before any external calls ---
+        storage::decrement_active_will_count(&env);
+        storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
+
+        will.balance = 0;
+        will.balances = Map::new(&env);
+        will.status = WillStatus::Cancelled;
+        will.confirmation_deadline = None;
+
+        storage::remove_owner_index(&env, &owner, will_id);
+        for beneficiary in will.beneficiaries.iter() {
+            storage::remove_beneficiary_index(&env, &beneficiary.address, will_id);
+        }
+
+        storage::save_will(&env, &will);
+
+        record_transition(
+            &env,
+            will_id,
+            prior_status,
+            WillStatus::Cancelled,
+            &contract_address,
+            symbol_short!("refund"),
+        );
+
+        // --- INTERACTIONS: external token transfers happen after state is settled ---
+        for (token_addr, balance) in balances_snapshot.iter() {
+            if balance > 0 {
+                token::Client::new(&env, &token_addr).transfer(&contract_address, &owner, &balance);
+            }
+        }
+
+        events::will_cancelled(&env, will_id, &owner, token_count);
     }
 
     // -----------------------------------------------------------------------
@@ -997,8 +1144,15 @@ impl WillContract {
 
         let now = env.ledger().timestamp();
         will.last_checkin = now;
-        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
         storage::save_will(&env, &will);
+        storage::bump_instance_ttl(&env);
+
+        // Refresh the owner index TTL on every check-in so that an account
+        // inactive for longer than BUMP_AMOUNT ledgers (roughly 60 days) does
+        // not find its OwnerWills entry expired the next time it calls
+        // create_will (#41).
+        storage::refresh_owner_index_ttl(&env, &will.owner);
 
         // Record the check-in in the same audit trail status transitions use
         // (#500). `status` does not change, so this is a same-status entry
@@ -1035,6 +1189,49 @@ impl WillContract {
         }
     }
 
+    /// Selects the token the keeper bounty is paid from (#109).
+    ///
+    /// `None` — the default, and what every creation path stores — pays the
+    /// bounty proportionally out of **every** token the will holds: each token
+    /// contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself. A
+    /// keeper's incentive therefore scales with the estate's whole value
+    /// instead of an arbitrarily chosen first token: an estate holding 1 XLM
+    /// and 100,000 USDC pays 1% of each, not 1% of the XLM alone.
+    ///
+    /// `Some(token)` concentrates the whole bounty on that one token, so the
+    /// owner can target the asset keepers actually want — typically the native
+    /// asset, so the bounty covers the keeper's gas. The token must be one the
+    /// will currently holds: the bounty is carved out of a balance the will
+    /// holds, and naming any other token could never pay from it. If the
+    /// targeted token's share rounds to zero at release time, `distribute`
+    /// falls back to the proportional split rather than leaving the keeper
+    /// unpaid.
+    ///
+    /// Passing `None` clears a previous selection and restores the
+    /// proportional split.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotOwner`] if `owner` does not own the will.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::InvalidBountyToken`] if `token` is not a token the will
+    ///   currently holds.
+    pub fn set_keeper_bounty_token(env: Env, will_id: u64, owner: Address, token: Option<Address>) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if let Some(ref bounty_token) = token {
+            if will.balances.get(bounty_token.clone()).unwrap_or(0) <= 0 {
+                panic_with_error!(&env, WillError::InvalidBountyToken);
+            }
+        }
+
+        will.keeper_bounty_token = token.clone();
+        storage::save_will(&env, &will);
+        events::keeper_bounty_token_set(&env, will_id, &token);
+    }
+
     /// Batch check-in across multiple wills in a single transaction.
     /// All wills must be owned by `owner` and in `Active` status.
     /// Panics if any will ID is invalid, not owned by `owner`, or not `Active`.
@@ -1068,7 +1265,7 @@ impl WillContract {
             assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
             will.last_checkin = now;
-            let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+            let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
             storage::save_will(&env, &will);
 
             // Same per-will audit entry as the single-will `check_in` path,
@@ -1087,6 +1284,7 @@ impl WillContract {
         }
 
         events::batch_checkin(&env, &owner, &will_ids, count);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Starts the grace period for `will_id` once the check-in deadline has
@@ -1121,7 +1319,7 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         let now = env.ledger().timestamp();
-        let deadline = will.last_checkin + will.checkin_period_days * SECONDS_PER_DAY;
+        let deadline = checked_add_timestamp(&env, will.last_checkin, checked_days_to_seconds(&env, will.checkin_period_days));
         if now < deadline {
             panic_with_error!(&env, WillError::CheckinNotDue);
         }
@@ -1132,8 +1330,14 @@ impl WillContract {
         // delayed trigger can neither postpone nor accelerate the release.
         will.status = WillStatus::Triggered;
         will.trigger_time = Some(deadline);
-        let grace_period_ends = grace_deadline(&will);
+        let grace_period_ends = grace_deadline(&env, &will);
         storage::save_will(&env, &will);
+
+        // Refresh the owner index TTL so that an owner account that has gone
+        // inactive long enough for its OwnerWills entry to approach expiry
+        // does not lose indexed wills if it resumes activity after the trigger
+        // cycle (#41).
+        storage::refresh_owner_index_ttl(&env, &will.owner);
 
         storage::index_triggered_will(&env, will_id);
 
@@ -1147,22 +1351,23 @@ impl WillContract {
         );
 
         events::will_triggered(&env, will_id, grace_period_ends);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Cancels an in-progress trigger during the grace period, proving the
     /// owner is alive, and resets the check-in countdown.
     ///
-    /// The grace deadline second belongs to the owner: this call is valid while
-    /// `now <= trigger_time + grace_period_days * SECONDS_PER_DAY` and panics
-    /// with [`WillError::GracePeriodExpired`] strictly after it. The rule in
+    /// The grace deadline second belongs to release: this call is valid while
+    /// `now < trigger_time + grace_period_days * SECONDS_PER_DAY` and panics
+    /// with [`WillError::GracePeriodExpired`] at or after it. The rule in
     /// [`Self::release_inheritance`] is the exact complement of this one, so
-    /// precisely one of the two succeeds at every timestamp (#354).
+    /// precisely one of the two succeeds at every timestamp (#14, #354).
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodExpired`] if the grace period has already
-    ///   elapsed, i.e. `now` is strictly greater than the grace deadline.
+    ///   elapsed, i.e. `now` is at or after the grace deadline.
     pub fn emergency_checkin(env: Env, will_id: u64, owner: Address) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
@@ -1183,7 +1388,7 @@ impl WillContract {
         // `assert_status(.., Triggered, ..)` above doesn't already guarantee
         // (a `Triggered` will always has `trigger_time` set).
         let now = env.ledger().timestamp();
-        if now > grace_deadline(&will) {
+        if now >= grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
@@ -1212,22 +1417,22 @@ impl WillContract {
             symbol_short!("emerg"),
         );
 
-        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Distributes all token balances to beneficiaries proportionally to
     /// their configured percentages. Callable by anyone once the grace
     /// period has fully elapsed.
     ///
-    /// The grace deadline second itself is **not** releasable: this call
-    /// requires `now` to be strictly greater than
-    /// `trigger_time + grace_period_days * SECONDS_PER_DAY` and panics with
-    /// [`WillError::GracePeriodNotExpired`] at or before it. The boundary second
-    /// therefore belongs to the owner's [`Self::emergency_checkin`], which
-    /// accepts `now <= deadline`. Exactly one of the two succeeds at any
-    /// timestamp, so the outcome no longer depends on which transaction the
-    /// ledger happens to order first (#354).
+    /// The grace deadline second itself is **releasable**: this call
+    /// requires `now >= trigger_time + grace_period_days * SECONDS_PER_DAY`
+    /// and panics with [`WillError::GracePeriodNotExpired`] before it.
+    /// The boundary second therefore belongs to `release_inheritance`;
+    /// [`Self::emergency_checkin`] accepts `now < deadline`, so exactly one
+    /// of the two succeeds at any timestamp and the outcome no longer depends
+    /// on which transaction the ledger happens to order first (#14, #354).
     ///
     /// Tokens are transferred directly to each beneficiary ("push" mode);
     /// there is no pull mode and no `claim_share` entry point. Whatever the
@@ -1269,8 +1474,8 @@ impl WillContract {
     ///   `env.ledger().timestamp() < trigger_time + grace_period_days` — the
     ///   grace period deadline has not passed yet.
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
-    /// - [`WillError::GracePeriodNotExpired`] if `now` is at or before the grace
-    ///   deadline, i.e. the grace period has not strictly elapsed yet.
+    /// - [`WillError::GracePeriodNotExpired`] if `now` is strictly before the grace
+    ///   deadline, i.e. the grace period has not yet elapsed.
     ///
     /// # Examples
     ///
@@ -1295,14 +1500,13 @@ impl WillContract {
             WillError::WillNotTriggered,
         );
 
-        // Timing invariant (#442): funds may only leave via this path once
-        // the grace period has fully elapsed, i.e. `now >= grace_period_end`.
-        // Strictly greater than is rejected: the boundary second belongs to
-        // the owner's `emergency_checkin`, so exactly one of these two entry
-        // points is valid at any timestamp and the outcome cannot depend on
-        // transaction order within a ledger (#354). `emergency_checkin` and
-        // `guardian_cancel_trigger` enforce the same deadline from the other
-        // side, so all three agree on when the grace period is over.
+        // Timing invariant (#14, #442): funds may only leave via this path once
+        // the grace period has elapsed, i.e. `now >= grace_deadline`.
+        // The grace deadline second belongs to release_inheritance: at
+        // `now == grace_deadline`, `release_inheritance` succeeds and
+        // `emergency_checkin` / `guardian_cancel_trigger` fail, so exactly one
+        // of the two is valid at any timestamp and the outcome cannot depend on
+        // transaction order within a ledger (#354).
         //
         // #751 — this used to also bind its own local `grace_deadline` via
         // `grace_period_end(&env, &will)` and re-check `now <= grace_deadline`
@@ -1313,7 +1517,7 @@ impl WillContract {
         // call below) conditional on the grace period *not yet* having
         // expired, the exact opposite of this function's purpose.
         let now = env.ledger().timestamp();
-        if now < grace_deadline(&will) {
+        if now < grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -1326,19 +1530,20 @@ impl WillContract {
             symbol_short!("release"),
         );
 
-        // The protocol-wide locked-value totals for *every* token the will
-        // holds are decremented inside `distribute` below, in its single
-        // EFFECTS step (`adjust_locked_for_balances` walks the full balance
-        // map, not just the primary-token mirror). Decrementing here as well
-        // would deduct every balance twice (#6). The guardian-quorum release
-        // path reaches the same `distribute` EFFECTS step without any
-        // pre-decrement, which is why that step is the single write path.
+        // The protocol's locked-value total for *every* token the will held is
+        // released inside `distribute`, whose effects block applies
+        // `storage::adjust_locked_for_balances(..., -1)` to `will.balances`
+        // exactly once, alongside `decrement_active_will_count`, before the
+        // token transfers below. Decrementing here as well would deduct each
+        // token twice and drive `total_locked_by_token` negative on every
+        // release (#6), so the single deduction is left to `distribute`.
 
         // Re-validate status and size immediately before any funds move
         // (#490, #491). See `assert_release_preconditions`.
         assert_release_preconditions(&env, will_id, &will);
 
         distribute(&env, &mut will, &caller);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Delivers a payout that failed during a previous `distribute` call
@@ -1405,12 +1610,12 @@ impl WillContract {
 
         // --- EFFECTS: mutate state and persist before any external calls ---
         storage::decrement_active_will_count(&env);
-        // Decrement the protocol locked-value total for *every* token the will
-        // held, not just the primary-token mirror, so a multi-token
-        // cancellation does not leave the other tokens' totals permanently
-        // inflated. `adjust_locked_for_balances` already walks every entry of
-        // the snapshot, so no additional per-token loop belongs here (#5).
         storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
+        // `adjust_locked_for_balances` already decrements the protocol
+        // locked-value total for *every* token in the snapshot, so a
+        // multi-token cancellation does not leave the other tokens' totals
+        // permanently inflated (#353). A second per-token loop here would
+        // deduct each total twice (#5).
 
         will.balance = 0;
         will.balances = Map::new(&env);
@@ -1499,13 +1704,14 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         assert_beneficiary_count(&env, &beneficiaries);
-        assert_valid_allocations(&env, &beneficiaries, total_balance(&will.balances));
+        assert_valid_allocations(&env, &beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
         assert_valid_allocations(
             &env,
             &beneficiaries,
+            &will.hashed_beneficiaries,
             primary_token_balance(&will.balances, &will.token),
         );
 
@@ -1690,9 +1896,19 @@ impl WillContract {
                 // remainder as a non-negative top-up (overage, never underage),
                 // however unevenly the renounced share divides — e.g. a prime
                 // number of basis points.
+                //
+                // #12: hashed beneficiaries hold a committed share of the same
+                // 10_000 bps pool, so the cap for visible percentage beneficiaries
+                // is `10_000 - hashed_bps`, not simply `10_000`. Without this
+                // adjustment the redistributed visible total would exceed the
+                // available headroom and the combined allocation would surpass
+                // 100%, distorting payouts when a hashed beneficiary later
+                // calls `reveal_and_claim`.
+                let hashed_bps = unclaimed_hashed_bps(&will.hashed_beneficiaries);
+                let max_visible_bps = 10_000u32.saturating_sub(hashed_bps);
                 let target_total: u32 = remaining_basis_points
                     .saturating_add(renounced_basis_points)
-                    .min(10_000);
+                    .min(max_visible_bps);
 
                 let mut percentage_total: u32 = 0;
                 for b in new_beneficiaries.iter() {
@@ -1745,7 +1961,9 @@ impl WillContract {
                 }
 
                 // Hard cap, independent of `assert_valid_allocations` below.
-                if running_total > 10_000 {
+                // Uses the same `max_visible_bps` ceiling applied to
+                // `target_total` above (#12).
+                if running_total > max_visible_bps {
                     panic_with_error!(&env, WillError::InvalidPercentages);
                 }
 
@@ -1788,12 +2006,17 @@ impl WillContract {
         // Update indexes: remove the renouncing beneficiary from the reverse index
         storage::remove_beneficiary_index(&env, &beneficiary, will_id);
 
-        // Validate the redistributed beneficiary allocations
+        // Validate the redistributed beneficiary allocations.
         assert_valid_allocations(
             &env,
             &will.beneficiaries,
+            &will.hashed_beneficiaries,
             primary_token_balance(&will.balances, &will.token),
         );
+        // #12: also validate the combined visible + hashed constraint so that
+        // the redistributed visible percentage total never exceeds the headroom
+        // left after hashed beneficiaries' committed shares are accounted for.
+        assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
         // Get the owner for event emission (not changed)
         let owner = will.owner.clone();
@@ -1996,13 +2219,12 @@ impl WillContract {
     ///   [`MAX_PERIOD_DAYS`].
     ///
     /// # Events
-    /// Emits [`events::periods_updated`] whose `next_deadline` field is the
-    /// deadline [`Self::trigger_will`] actually enforces, namely
-    /// `last_checkin + checkin_period_days * SECONDS_PER_DAY`. This function
-    /// never touches `last_checkin`, so that value is independent of when the
-    /// owner happens to call: an indexer that schedules reminders from the event
-    /// stays in sync with the on-chain rule instead of drifting later by however
-    /// long it has been since the last check-in (#357).
+    /// Emits [`events::periods_updated`] whose `next_deadline` field is
+    /// `now + checkin_period_days * SECONDS_PER_DAY`, where `now` is the
+    /// timestamp at which this call executes. Because the owner must sign this
+    /// transaction, `update_periods` resets `last_checkin` to `now` so that
+    /// reducing the period can never retroactively expire the will and make it
+    /// immediately triggerable by a keeper (#15).
     pub fn update_periods(
         env: Env,
         will_id: u64,
@@ -2013,6 +2235,8 @@ impl WillContract {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        let now = env.ledger().timestamp();
 
         // Update checkin period if provided
         if let Some(new_checkin) = checkin_period_days {
@@ -2032,11 +2256,11 @@ impl WillContract {
             will.grace_period_days = new_grace;
         }
 
-        // `trigger_will` derives the deadline from `last_checkin`, which this call
-        // leaves untouched, so the event must carry that same value rather than
-        // `now + period` — otherwise the published deadline is later than the
-        // enforced one by the age of the current check-in (#357).
-        let next_deadline = will.last_checkin + will.checkin_period_days * SECONDS_PER_DAY;
+        // Reset last_checkin to now so the new periods apply from this moment,
+        // preventing retroactive expiration if the owner reduces the period below
+        // the already elapsed time (#15).
+        will.last_checkin = now;
+        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2104,13 +2328,14 @@ impl WillContract {
         // Update beneficiaries if provided
         if let Some(new_beneficiaries) = beneficiaries {
             assert_beneficiary_count(&env, &new_beneficiaries);
-            assert_valid_allocations(&env, &new_beneficiaries, total_balance(&will.balances));
+            assert_valid_allocations(&env, &new_beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
             if new_beneficiaries.is_empty() || new_beneficiaries.len() > MAX_BENEFICIARIES {
                 panic_with_error!(&env, WillError::TooManyBeneficiaries);
             }
             assert_valid_allocations(
                 &env,
                 &new_beneficiaries,
+                &will.hashed_beneficiaries,
                 primary_token_balance(&will.balances, &will.token),
             );
 
@@ -2267,6 +2492,7 @@ impl WillContract {
         token::Client::new(&env, &token).transfer(&owner, &env.current_contract_address(), &amount);
 
         events::top_up(&env, will_id, &owner, &token, amount, new_balance);
+        storage::bump_instance_ttl(&env);
     }
 
     /// Returns the contract version as a `u32` encoded semver value:
@@ -2364,8 +2590,7 @@ impl WillContract {
 
         match will.status {
             WillStatus::Active => {
-                let deadline =
-                    will.last_checkin as i64 + (will.checkin_period_days * SECONDS_PER_DAY) as i64;
+                let deadline = checked_deadline_as_i64(&env, will.last_checkin, will.checkin_period_days);
                 Some(deadline - now)
             }
             WillStatus::Triggered => {
@@ -2376,8 +2601,8 @@ impl WillContract {
                 // future entry point ever saves a `Triggered` will without it,
                 // in which case it deliberately degrades to `last_checkin`
                 // (understating the elapsed grace period) rather than panicking.
-                let trigger_time = will.trigger_time.unwrap_or(will.last_checkin) as i64;
-                let deadline = trigger_time + (will.grace_period_days * SECONDS_PER_DAY) as i64;
+                let trigger_time = will.trigger_time.unwrap_or(will.last_checkin);
+                let deadline = checked_deadline_as_i64(&env, trigger_time, will.grace_period_days);
                 Some(deadline - now)
             }
             WillStatus::PendingConfirmation
@@ -2416,6 +2641,29 @@ impl WillContract {
         } else {
             None
         }
+    }
+
+    /// Returns all active guardian trigger votes and their reason metadata for `will_id` (#38).
+    ///
+    /// Iterates through every guardian configured on the will and collects their
+    /// active, non-expired [`GuardianVoteRecord`].
+    ///
+    /// As documented in [`GuardianVoteReason`] and ADR 0001, reasons are purely
+    /// informational metadata with no on-chain consensus requirement. This query
+    /// enables off-chain indexers and legal executors to audit all cast reasons
+    /// across guardians in a single call and detect conflicting claims.
+    pub fn get_guardian_votes(env: Env, will_id: u64) -> Vec<(Address, GuardianVoteRecord)> {
+        let will = load_will(&env, will_id);
+        let now = env.ledger().timestamp();
+        let mut votes = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if let Some(record) = storage::get_guardian_vote(&env, will_id, &g.address) {
+                if storage::vote_is_live(now, record.timestamp, will.grace_period_days) {
+                    votes.push_back((g.address, record));
+                }
+            }
+        }
+        votes
     }
 
     /// Returns aggregate protocol statistics for all wills currently tracked on-chain.
@@ -2468,6 +2716,18 @@ impl WillContract {
         };
         storage::save_protocol_stats(&env, &repaired);
         repaired
+    }
+
+    /// Recomputes a bounded chunk of protocol statistics (#24).
+    ///
+    /// Reads at most `batch_size` wills starting from `start_id`.
+    /// Returns `(chunk_stats, next_start_id, done)`.
+    pub fn recompute_protocol_stats_chunk(
+        env: Env,
+        start_id: u64,
+        batch_size: u32,
+    ) -> (ProtocolStats, u64, bool) {
+        storage::recompute_protocol_stats_chunk(&env, start_id, batch_size)
     }
 
     /// Returns the list of will ids currently in `Triggered` status.
@@ -2858,8 +3118,8 @@ impl WillContract {
 
         // Enforce guardian-list cooldown.
         let now = env.ledger().timestamp();
-        let cooldown_seconds = GUARDIAN_COOLDOWN_DAYS * SECONDS_PER_DAY;
-        let cooldown_ends = will.guardian_list_updated_at + cooldown_seconds;
+        let cooldown_seconds = checked_days_to_seconds(&env, GUARDIAN_COOLDOWN_DAYS);
+        let cooldown_ends = checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
         if now < cooldown_ends {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
@@ -2982,14 +3242,14 @@ impl WillContract {
         // restart the check-in clock (#373) -- same rule `emergency_checkin`
         // enforces, so a guardian quorum and the owner are held to one deadline.
         let trigger_time = will.trigger_time.unwrap_or(0);
-        let grace_deadline = trigger_time + will.grace_period_days * SECONDS_PER_DAY;
-        if now > grace_deadline {
+        let grace_deadline = checked_add_timestamp(&env, trigger_time, checked_days_to_seconds(&env, will.grace_period_days));
+        if now >= grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
         // Enforce guardian-list cooldown (same rule as guardian_trigger).
-        let cooldown_seconds = GUARDIAN_COOLDOWN_DAYS * SECONDS_PER_DAY;
-        let cooldown_ends = will.guardian_list_updated_at + cooldown_seconds;
+        let cooldown_seconds = checked_days_to_seconds(&env, GUARDIAN_COOLDOWN_DAYS);
+        let cooldown_ends = checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
         if now < cooldown_ends {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
@@ -3065,7 +3325,7 @@ impl WillContract {
                 symbol_short!("gcancel"),
             );
 
-            let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+            let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
             events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
         }
     }
@@ -3298,6 +3558,12 @@ impl WillContract {
         }
         assert_valid_guardians(&env, &owner, &source_guardian_addresses);
 
+        // Checked before any transfer: a call that was always going to fail
+        // MAX_WILLS_PER_INDEX for the owner or a beneficiary should fail on
+        // this cheap in-contract check, not after the token transfer below
+        // has already succeeded (#51).
+        storage::assert_index_capacity(&env, &owner, &source.beneficiaries);
+
         // Build balances map and transfer tokens from the owner.
         let mut balances: Map<Address, i128> = Map::new(&env);
         for (token_addr, amount) in tokens.iter() {
@@ -3323,6 +3589,7 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &source.beneficiaries,
+            &cloned_hashed,
             primary_token_balance(&balances, &primary_token),
         );
 
@@ -3334,6 +3601,21 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
+        // Deep-copy hashed beneficiaries from the source, resetting each
+        // `claimed` flag so the cloned will's commitments are fresh and
+        // can be independently revealed via `reveal_and_claim` (#52).
+        // Dropping hashed_beneficiaries and keeping only the visible
+        // beneficiaries would violate the 10,000 bps invariant whenever
+        // the source reserved some basis points for hashed slots.
+        let mut cloned_hashed: Vec<HashedBeneficiary> = Vec::new(&env);
+        for hb in source.hashed_beneficiaries.iter() {
+            cloned_hashed.push_back(HashedBeneficiary {
+                commitment: hb.commitment.clone(),
+                percentage: hb.percentage,
+                claimed: false,
+            });
+        }
+
         let will = Will {
             id: will_id,
             owner: owner.clone(),
@@ -3342,7 +3624,7 @@ impl WillContract {
             is_native: false,
             balance: primary_amount,
             beneficiaries: source.beneficiaries.clone(),
-            hashed_beneficiaries: Vec::new(&env),
+            hashed_beneficiaries: cloned_hashed,
             checkin_period_days: source.checkin_period_days,
             grace_period_days: source.grace_period_days,
             last_checkin: now,
@@ -3358,6 +3640,9 @@ impl WillContract {
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: source.keeper_bounty_bps,
+            // The clone copies the source's balances verbatim, so a targeted
+            // bounty token stays held by the clone (#109).
+            keeper_bounty_token: source.keeper_bounty_token.clone(),
             delegate: None,
         };
         storage::save_will(&env, &will);
@@ -3383,7 +3668,7 @@ impl WillContract {
             &owner,
             token_count,
             &will.beneficiaries,
-            now + source.checkin_period_days * SECONDS_PER_DAY,
+            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, source.checkin_period_days)),
         );
         events::will_cloned(&env, source_will_id, will_id, &owner);
 
@@ -3501,6 +3786,7 @@ impl WillContract {
             assert_valid_allocations(
                 &env,
                 &beneficiaries,
+                &Vec::new(&env),
                 primary_token_balance(&balances, &primary_token),
             );
 
@@ -3548,6 +3834,7 @@ impl WillContract {
                 guardian_list_updated_at: now,
                 schema_version: CURRENT_SCHEMA_VERSION,
                 keeper_bounty_bps: 0,
+                keeper_bounty_token: None,
                 delegate: None,
             };
             storage::save_will(&env, &will);
@@ -3570,7 +3857,7 @@ impl WillContract {
                 &owner,
                 token_count,
                 &will.beneficiaries,
-                now + checkin_period_days * SECONDS_PER_DAY,
+                checked_add_timestamp(&env, now, checked_days_to_seconds(&env, checkin_period_days)),
             );
 
             ids.push_back(will_id);
@@ -3590,26 +3877,23 @@ impl WillContract {
     /// migrating (see [`migration::decode_will`]); migrating rewrites them in
     /// the current layout.
     ///
-    /// # Current behavior (v0 → v1)
-    /// Sets the schema_version field to 1.
-    /// # Current behavior is a placeholder
-    /// [`CURRENT_SCHEMA_VERSION`] (defined in [`storage`] and re-exported at
-    /// the crate root) is `1`, and every will created by this
-    /// contract version is already stamped with `schema_version:
-    /// CURRENT_SCHEMA_VERSION` at creation time (see [`create_will`] and
-    /// [`batch_create_wills`]). Because of that, `old_version >=
+    /// # Current behavior (v0 → v2)
+    /// - v0 → v1: sets the `schema_version` field to 1 (v0 wills predate the
+    ///   field being populated; the layout is otherwise identical).
+    /// - v1 → v2: stamps version 2. v2 added `Will::keeper_bounty_token`
+    ///   (#109); `decode_will` already lifts a v1 entry into the current
+    ///   shape with that field defaulted to `None` (the proportional
+    ///   keeper-bounty split), so the step only rewrites the version number.
+    ///
+    /// Wills created by this contract version are already stamped with
+    /// `schema_version: CURRENT_SCHEMA_VERSION` at creation time (see
+    /// [`create_will`] and [`batch_create_wills`]), so `old_version >=
     /// CURRENT_SCHEMA_VERSION` is true for any will this contract could
-    /// actually produce, so the early return below is taken unconditionally
-    /// and the body never runs in practice — there is no real migration
-    /// wired up yet. The `will.schema_version = CURRENT_SCHEMA_VERSION` line
-    /// and the emitted `will_migrated` event exist only as the scaffold a
-    /// future schema bump will hang real field transformations off of; a
-    /// will could only reach this function with `old_version <
-    /// CURRENT_SCHEMA_VERSION` after a future contract upgrade raises
-    /// [`storage::CURRENT_SCHEMA_VERSION`] and defines an actual v1 → v2
-    /// (or later) transformation here. Because that constant is the single
-    /// source of truth, the entry point and the storage layer can never
-    /// disagree about the current version.
+    /// actually produce and the early return below is taken for them. Only a
+    /// will written by an older layout — and left un-migrated — reaches the
+    /// body. Because [`storage::CURRENT_SCHEMA_VERSION`] is the single source
+    /// of truth, the entry point and the storage layer can never disagree
+    /// about the current version.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
@@ -3843,6 +4127,16 @@ impl WillContract {
         will_a.guardian_votes = 0;
         will_a.guardian_cancel_votes = 0;
 
+        // Reconcile the keeper-bounty token with the combined balances (#109):
+        // a token targeted on the surviving will but no longer held after the
+        // merge could never pay a bounty, so the will falls back to the
+        // proportional split instead of naming a token it does not hold.
+        if let Some(ref bounty_token) = will_a.keeper_bounty_token {
+            if will_a.balances.get(bounty_token.clone()).unwrap_or(0) <= 0 {
+                will_a.keeper_bounty_token = None;
+            }
+        }
+
         // Remove old beneficiary indexes for will_b
         for beneficiary in will_b.beneficiaries.iter() {
             storage::remove_beneficiary_index(&env, &beneficiary.address, will_id_b);
@@ -3944,20 +4238,24 @@ impl WillContract {
     ///
     /// # Parameters
     /// - `will_id`: the will whose trail to read.
-    /// - `cursor`: optional zero-based offset into the trail. Pass `None` or `0`
-    ///   for the first page.
+    /// - `cursor`: optional sequence number (`WillStatusTransition::seq`).
+    ///   Only entries with `seq` **strictly greater than** the cursor are
+    ///   returned; pass `None` or `Some(0)` to start from the beginning.
+    ///   To page forward, pass the `seq` of the last entry received as the
+    ///   next cursor.
     /// - `limit`: maximum number of transitions to return. Capped at
     ///   [`storage::MAX_PAGE_SIZE`].
     ///
     /// # Pagination
     /// 1. Call with `cursor=None, limit=N`.
-    /// 2. If the page has `N` entries, call again with `cursor = offset + N`.
+    /// 2. If the page has `N` entries, call again with
+    ///    `cursor = Some(last_entry.seq as u32)`.
     /// 3. Repeat until a page comes back shorter than `N`.
     ///
-    /// The cursor is positional, not keyed. It is stable for the duration of a
-    /// walk as long as no transition is appended past the cursor, but a
-    /// concurrent write that trips the history cap trims the front of the
-    /// trail and shifts every earlier offset — restart the walk in that case.
+    /// The seq-based cursor is stable across history trimming: when the oldest
+    /// entries are dropped to enforce the cap, no existing `seq` value shifts,
+    /// so a stored cursor never silently skips or re-reads entries on the next
+    /// call (#59).
     pub fn get_will_history_page(
         env: Env,
         will_id: u64,
@@ -3973,7 +4271,7 @@ impl WillContract {
     /// by Soroban's state archival system.
     ///
     /// **Callable by anyone**: no `require_auth` is enforced. Once a will
-    /// reaches a terminal state (`Released` or `Cancelled`) any party may
+    /// reaches a terminal state (`Released`, `Cancelled` or `Settled`) any party may
     /// call this function to reclaim on-chain storage and reduce ledger-rent
     /// costs. The design is intentional — a will's final asset distributions
     /// are already complete before this point — but it creates an observable
@@ -4027,7 +4325,7 @@ impl WillContract {
     ///    event log, which archival does not touch.
     /// 2. **Network TTL expiry** — the will's persistent entry lapsed.
     ///    Terminal wills stop renewing their TTL (see `storage::save_will`),
-    ///    so Released/Cancelled wills gradually expire. The entry can be
+    ///    so Released/Cancelled/Settled wills gradually expire. The entry can be
     ///    restored by a network-level state-restore transaction; until then
     ///    the contract cannot serve it.
     /// 3. **Never created** — the id was never allocated. Clients can rule
@@ -4050,17 +4348,26 @@ impl WillContract {
     /// - [`WillError::WillNotFound`] if no will exists with this id (see
     ///   the ambiguity note above — this error is also returned for wills
     ///   that have already been archived).
-    /// - [`WillError::WillNotSettled`] if the will is not `Released` or `Cancelled`.
+    /// - [`WillError::WillNotSettled`] if the will is not `Released`,
+    ///   `Cancelled` or `Settled`.
     pub fn archive_will(env: Env, will_id: u64) {
         let will = load_will(&env, will_id);
-        if will.status != WillStatus::Released && will.status != WillStatus::Cancelled {
+        // `Settled` is terminal too: `close_will` moves a `Released` will to
+        // `Settled` as its final step, so rejecting it here would trap closed
+        // wills in active storage forever, paying rent with no path to
+        // archival (#8).
+        if will.status != WillStatus::Released
+            && will.status != WillStatus::Cancelled
+            && will.status != WillStatus::Settled
+        {
             panic_with_error!(&env, WillError::WillNotSettled);
         }
 
-        let reason = if will.status == WillStatus::Released {
-            symbol_short!("released")
-        } else {
-            symbol_short!("cancelled")
+        let reason = match will.status {
+            WillStatus::Cancelled => symbol_short!("cancelled"),
+            WillStatus::Settled => symbol_short!("settled"),
+            // The gate above leaves only `Released`.
+            _ => symbol_short!("released"),
         };
         storage::archive_will(&env, &will);
 
@@ -4071,6 +4378,34 @@ impl WillContract {
             env.ledger().timestamp(),
             reason,
         );
+    }
+
+    /// Returns the archived will record for `will_id`.
+    ///
+    /// Archived wills are stored under [`storage::DataKey::ArchivedWill`] with a
+    /// managed persistent storage TTL. This entrypoint allows callers to inspect
+    /// historical wills for audit purposes before ledger pruning.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no archived will exists with this id.
+    pub fn get_archived_will(env: Env, will_id: u64) -> Will {
+        match storage::load_archived_will(&env, will_id) {
+            Ok(will) => will,
+            Err(err) => panic_with_error!(&env, err),
+        }
+    }
+
+    /// Extends the persistent storage TTL of an archived will record.
+    ///
+    /// Callable by anyone to keep an archived will entry alive in persistent storage
+    /// and prevent it from being pruned by the Soroban ledger archival system.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no archived will exists with this id.
+    pub fn extend_archived_will_ttl(env: Env, will_id: u64) {
+        if let Err(err) = storage::extend_archived_will_ttl(&env, will_id) {
+            panic_with_error!(&env, err);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4130,7 +4465,9 @@ impl WillContract {
     /// - [`WillError::DuplicateBeneficiary`] if an address appears more than
     ///   once in `beneficiaries_to_split`.
     /// - [`WillError::InvalidSplit`] if `beneficiaries_to_split` is empty or would
-    ///   leave the source will with no beneficiaries.
+    ///   leave the source will with no beneficiaries, or if the source will has
+    ///   unrevealed hashed beneficiaries (splitting would leave hashed
+    ///   commitments under-funded on the source — see issue #58).
     /// - [`WillError::FixedAmountExceedsBalance`] if either the remaining or
     ///   split beneficiary list has `Allocation::FixedAmount` entries that no
     ///   longer fit the resulting balance.
@@ -4144,6 +4481,17 @@ impl WillContract {
         owner.require_auth();
         let mut source = load_owned(&env, will_id, &owner);
         assert_status(&env, &source, WillStatus::Active, WillError::WillNotActive);
+
+        // Reject the split if the source will has any unrevealed hashed
+        // beneficiaries (#58). A split subtracts token balances from the
+        // source but leaves hashed basis points unchanged, which would leave
+        // the source under-funded at reveal_and_claim time. Until a
+        // proportional re-allocation scheme is implemented, the safest
+        // behaviour is to refuse the split outright, matching the treatment
+        // of merge_wills (MergeWithHashedBeneficiaries / code 47).
+        if !source.hashed_beneficiaries.is_empty() {
+            panic_with_error!(&env, WillError::InvalidSplit);
+        }
 
         if tokens.is_empty() || tokens.len() > MAX_TOKENS {
             panic_with_error!(&env, WillError::InvalidTokenCount);
@@ -4185,13 +4533,15 @@ impl WillContract {
 
         // A repeated address would silently collapse in the filter below and
         // leave the source and child disagreeing about how many beneficiaries
-        // moved, so reject it up front.
-        for (i, s) in beneficiaries_to_split.iter().enumerate() {
-            for other in beneficiaries_to_split.iter().skip(i + 1) {
-                if s.address == other.address {
-                    panic_with_error!(&env, WillError::DuplicateBeneficiary);
-                }
-            }
+        // moved, so reject it up front using the shared duplicate-detection
+        // helper (#44). The `DuplicateBeneficiary` error code (rather than
+        // `InvalidSplit`) makes sense here: the caller supplied an invalid
+        // beneficiary list, same as in `create_will`.
+        split_uniqueness_check::assert_no_duplicate_beneficiary_addresses(&env, &beneficiaries_to_split);
+
+        // Verify every address in beneficiaries_to_split actually exists on
+        // the source will before attempting the split.
+        for s in beneficiaries_to_split.iter() {
             if !names_address(&source.beneficiaries, &s.address) {
                 panic_with_error!(&env, WillError::BeneficiaryNotFound);
             }
@@ -4246,11 +4596,13 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &normalised_remaining,
+            &source.hashed_beneficiaries,
             primary_token_balance(&source.balances, &source.token),
         );
         assert_valid_allocations(
             &env,
             &normalised_split,
+            &Vec::new(&env),
             primary_token_balance(&child_balances, &primary_token),
         );
 
@@ -4271,6 +4623,21 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &b.address, new_id);
         }
 
+        let child_guardians = reset_guardian_consent(&env, &source.guardians);
+        // Unmodified guardian lists on child wills inherit source cooldown timestamps (#37).
+        // Only set `now` if the guardian list was altered during the split.
+        let guardian_list_unmodified = child_guardians.len() == source.guardians.len()
+            && child_guardians
+                .iter()
+                .zip(source.guardians.iter())
+                .all(|(c, s)| c.address == s.address && c.weight == s.weight);
+
+        let guardian_list_updated_at = if guardian_list_unmodified {
+            source.guardian_list_updated_at
+        } else {
+            now
+        };
+
         let child = Will {
             id: new_id,
             owner: source.owner.clone(),
@@ -4286,22 +4653,23 @@ impl WillContract {
             trigger_time: None,
             confirmation_deadline: None,
             status: WillStatus::Active,
-            guardians: reset_guardian_consent(&env, &source.guardians),
+            guardians: child_guardians,
             guardian_vote_weight: 0,
             guardian_votes: 0,
             guardian_cancel_vote_weight: 0,
             guardian_cancel_votes: 0,
             guardian_threshold: source.guardian_threshold,
-            guardian_list_updated_at: now,
+            guardian_list_updated_at,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: 0,
+            keeper_bounty_token: None,
             delegate: None,
         };
         storage::save_will(&env, &child);
         storage::index_by_owner(&env, &source.owner, new_id);
         // The child is a new live will. Its balance moved out of the source,
-        // so the locked totals are unchanged.
-        storage::increment_active_will_count(&env);
+        // so the locked totals are unchanged. The source was already counted
+        // as active, so this nets +1 live will for the child alone (#7).
         storage::increment_active_will_count(&env);
 
         // Seed the child's audit trail with the same `create` transition
@@ -4324,7 +4692,7 @@ impl WillContract {
             &owner,
             child_token_count,
             &normalised_split,
-            now + source.checkin_period_days * SECONDS_PER_DAY,
+            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, source.checkin_period_days)),
         );
 
         new_id
@@ -4392,11 +4760,6 @@ impl WillContract {
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        // A commitment that is not a SHA-256 digest can never match a hashed
-        // pre-image, so the slot would be unclaimable (#452).
-        if commitment.len() != 32 {
-            panic_with_error!(&env, WillError::InvalidPreimage);
-        }
         // Validate the new slot before mutating the will, so a rejected call
         // leaves no partial state behind (#371).
         assert_valid_hashed_beneficiary(&env, &will.hashed_beneficiaries, &commitment, percentage);
@@ -4524,7 +4887,7 @@ impl WillContract {
             WillError::WillNotReleased,
         );
 
-        if env.ledger().timestamp() < grace_deadline(&will) {
+        if env.ledger().timestamp() < grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -4804,9 +5167,12 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
 ///   one entry per address, so a repeat would silently drop one of the
 ///   allocations rather than actually splitting the share).
 /// - Every `Allocation::Percentage` must be non-zero, and all percentage
-///   shares together must sum to exactly 10,000 basis points (100 % of
-///   whatever remains once fixed amounts are set aside) — this guarantees
-///   every token balance is fully distributed with no dust left behind.
+///   shares together must not exceed 10,000 basis points — over-allocation
+///   is rejected, but a total below 10,000 is allowed so that hashed
+///   beneficiary slots can fill the remainder (#57). The combined total
+///   (visible + hashed) is validated to equal exactly 10,000 by
+///   [`assert_valid_percentages`], which runs after every
+///   [`WillContract::add_hashed_beneficiary`] call.
 /// - Every `Allocation::FixedAmount` must be positive, and the sum of every
 ///   fixed amount on the will must never exceed `primary_balance` —
 ///   otherwise `distribute` could not pay every fixed beneficiary in full.
@@ -4818,10 +5184,21 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
 ///   beneficiaries at all) is allowed to account for less than the whole
 ///   balance; the unallocated remainder is refunded to the owner at
 ///   distribute time rather than left stranded in the contract (#383).
-fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, primary_balance: i128) {
+/// - When `hashed_beneficiaries` is provided, their committed percentages are
+///   included in the total percentage check so that visible + hashed never
+///   exceed 10,000 basis points (#13).
+fn assert_valid_allocations(
+    env: &Env,
+    beneficiaries: &Vec<Beneficiary>,
+    hashed_beneficiaries: &Vec<HashedBeneficiary>,
+    primary_balance: i128,
+) {
     let mut percentage_total: u32 = 0;
     let mut fixed_total: i128 = 0;
     let mut has_percentage = false;
+
+    // Check for duplicate addresses first using the shared helper (#44).
+    split_uniqueness_check::assert_no_duplicate_beneficiary_addresses(env, beneficiaries);
 
     for i in 0..beneficiaries.len() {
         let beneficiary = beneficiaries.get_unchecked(i);
@@ -4840,16 +5217,17 @@ fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, primary
                 fixed_total = fixed_total.saturating_add(amount);
             }
         }
-        for j in (i + 1)..beneficiaries.len() {
-            if beneficiary.address == beneficiaries.get_unchecked(j).address {
-                panic_with_error!(env, WillError::DuplicateBeneficiary);
-            }
-        }
     }
 
     if fixed_total > primary_balance {
         panic_with_error!(env, WillError::FixedAmountExceedsBalance);
     }
+
+    // Include hashed beneficiary percentages in the total (#13).
+    for hb in hashed_beneficiaries.iter() {
+        total_checked_add(&mut percentage_total, hb.percentage, env);
+    }
+
     if has_percentage && percentage_total != 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
     }
@@ -5126,6 +5504,7 @@ fn primary_token_balance(balances: &Map<Address, i128>, primary_token: &Address)
     balances.get(primary_token.clone()).unwrap_or(0)
 }
 
+
 /// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
 /// repeated address. Also validates that the owner is not in the guardian list.
 ///
@@ -5203,6 +5582,38 @@ fn wills_by_owner_and_status_page(
     }
 }
 
+/// Computes `days * SECONDS_PER_DAY` with overflow detection (#16).
+///
+/// Panics with [`WillError::ArithmeticOverflow`] if the multiplication would
+/// overflow `u64`. `days` is bounded by `MAX_PERIOD_DAYS` when set, but the
+/// check here is defense in depth for fuzz and edge cases.
+fn checked_days_to_seconds(env: &Env, days: u64) -> u64 {
+    days.checked_mul(SECONDS_PER_DAY)
+        .unwrap_or_else(|| panic_with_error!(env, WillError::ArithmeticOverflow))
+}
+
+/// Computes `base + offset` with overflow detection (#16).
+///
+/// Panics with [`WillError::ArithmeticOverflow`] if the addition would
+/// overflow `u64`. Used for all deadline calculations where `base` is a
+/// ledger timestamp and `offset` is a period converted to seconds.
+fn checked_add_timestamp(env: &Env, base: u64, offset: u64) -> u64 {
+    base.checked_add(offset)
+        .unwrap_or_else(|| panic_with_error!(env, WillError::ArithmeticOverflow))
+}
+
+/// Computes a deadline as `i64` for time-until calculations (#16).
+///
+/// Used by `get_time_until_deadline` which returns signed seconds to allow
+/// negative values (past-due deadlines). Panics with
+/// [`WillError::ArithmeticOverflow`] if the computation overflows.
+fn checked_deadline_as_i64(env: &Env, base: u64, days: u64) -> i64 {
+    let offset = checked_days_to_seconds(env, days);
+    let deadline_u64 = checked_add_timestamp(env, base, offset);
+    deadline_u64.try_into()
+        .unwrap_or_else(|_| panic_with_error!(env, WillError::ArithmeticOverflow))
+}
+
 /// Returns the Unix timestamp at which `will`'s grace period ends.
 ///
 /// The grace period starts at the missed check-in deadline
@@ -5212,11 +5623,13 @@ fn wills_by_owner_and_status_page(
 /// goes through this helper so they can never disagree. The fallback for a
 /// missing `trigger_time` uses the same anchor rather than `0`, which would
 /// otherwise make the grace period appear long expired.
-fn grace_deadline(will: &Will) -> u64 {
-    let start = will
-        .trigger_time
-        .unwrap_or(will.last_checkin + will.checkin_period_days * SECONDS_PER_DAY);
-    start + will.grace_period_days * SECONDS_PER_DAY
+fn grace_deadline(env: &Env, will: &Will) -> u64 {
+    let start = will.trigger_time.unwrap_or_else(|| {
+        let period_seconds = checked_days_to_seconds(env, will.checkin_period_days);
+        checked_add_timestamp(env, will.last_checkin, period_seconds)
+    });
+    let grace_seconds = checked_days_to_seconds(env, will.grace_period_days);
+    checked_add_timestamp(env, start, grace_seconds)
 }
 
 /// Counts the live votes on `will` and returns `(vote_count, vote_weight)`.
@@ -5318,17 +5731,48 @@ pub(crate) fn proportional_share(total: i128, basis_points: u32) -> i128 {
     whole * basis_points as i128 + remainder * basis_points as i128 / BASIS_POINTS_TOTAL
 }
 
+/// Fills `plan` with the keeper bounty of **every** token the will holds:
+/// each token contributes `floor(balance * keeper_bounty_bps / 10_000)` of
+/// itself, skipping tokens whose share rounds to zero (#109).
+///
+/// This is the default selection whenever `will.keeper_bounty_token` is `None`
+/// (or names a token the will no longer holds), and the fallback when a
+/// targeted token's share rounds to zero. It is what makes a keeper's
+/// incentive on a multi-token estate scale with the estate's whole value
+/// instead of an arbitrarily chosen first token.
+fn collect_proportional_bounties(plan: &mut Map<Address, i128>, will: &Will) {
+    for (token_addr, total) in will.balances.iter() {
+        if total == 0 {
+            continue;
+        }
+        let amount = proportional_share(total, will.keeper_bounty_bps);
+        if amount > 0 {
+            plan.set(token_addr, amount);
+        }
+    }
+}
+
 /// Pays out every token balance the will holds, marks the will `Released`,
 /// and publishes the `InheritanceReleased` event.
 ///
 /// For each token in `will.balances` the balance is split as follows:
 ///
-/// 1. The keeper bounty (`will.keeper_bounty_bps`), taken out of a single
-///    token, when a non-owner keeper released the will (#297). The token is
-///    chosen once, up front, as the first entry of `will.balances` whose
-///    bounty share rounds above zero; that same token is both reduced to make
-///    room and used to pay the keeper (#378). If no token's share rounds
-///    above zero, no bounty is paid and no beneficiary share is reduced.
+/// 1. The keeper bounty (`will.keeper_bounty_bps`), when a non-owner keeper
+///    released the will (#297). Which tokens it comes out of is chosen once,
+///    up front, before any per-token math runs (#378/#109):
+///    - `will.keeper_bounty_token = Some(t)` — the whole bounty is computed
+///      from and paid out of `t` (that same token is reduced to make room and
+///      used to pay the keeper, so the two can never desynchronise). If `t`'s
+///      share rounds to zero, selection falls back to the proportional split
+///      so the keeper is never left unpaid while the will holds value
+///      elsewhere.
+///    - `will.keeper_bounty_token = None` (the default) — every held token
+///      contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself,
+///      so the keeper is paid in proportion to the estate's whole value
+///      instead of whatever token was locked first (#109).
+///
+///    If every token's share rounds to zero, no bounty is paid and no
+///    beneficiary share is reduced.
 /// 2. The reserve for hashed beneficiaries that have not yet called
 ///    `reveal_and_claim` (#181/#186). It is withheld from the visible
 ///    beneficiaries and left in `will.balances` for later claiming.
@@ -5386,43 +5830,53 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     let token_count = will.balances.len();
 
     // --- COMPUTE: calculate every share from the current (pre-mutation) balances ---
-    // Calculate keeper bounty if applicable (not paid to owner, only to other keepers)
-    let mut bounty_amount: i128 = 0;
-    let mut bounty_computed = false;
     // A keeper bounty is due only to a caller other than the owner.
     let should_pay_bounty = keeper
         .as_ref()
         .map(|k| k != &will.owner && will.keeper_bounty_bps > 0)
         .unwrap_or(false);
 
-    // Pick the single token the bounty is computed from *and* paid out of,
-    // before any per-token math runs (#378). Previously the bounty was
-    // computed inside the per-token loop under a `bounty_amount == 0` guard
-    // while the payout happened in the first entry of `transfer_plan`: on a
-    // multi-token will whose first token's bounty rounded to zero, the amount
-    // was computed against a *later* token but transferred with the *first*
-    // token's client — and that first token's balance had never been reduced
-    // to make room, so the keeper was paid out of beneficiaries' funds or the
-    // whole release aborted. Choosing the token up front and keying both the
-    // deduction and the payment off the same address makes the two impossible
-    // to desynchronise.
+    // Per-token bounty amounts, keyed by the token each is paid from. Both the
+    // deduction inside the per-token loop and the payout in the INTERACTIONS
+    // phase read this one map, so the two can never desynchronise (#378).
     //
-    // Rounding: the bounty is `floor(balance * keeper_bounty_bps / 10_000)`
-    // through [`proportional_share`], so a token too small for the share to
-    // round above zero contributes nothing and is skipped. If *every* token
-    // rounds to zero, no bounty is paid at all and no beneficiary share is
-    // reduced — the tokens are distributed in full.
-    let mut bounty_token: Option<(Address, i128)> = None;
+    // Token selection (#109):
+    //
+    // - `keeper_bounty_token = Some(t)` — the whole bounty comes out of `t`.
+    //   If `t`'s share rounds to zero the selection falls back to the
+    //   proportional split below, so a targeted-but-dust token can never
+    //   leave the keeper unpaid while the will holds value elsewhere.
+    // - `keeper_bounty_token = None` (the default) — every held token
+    //   contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself.
+    //   A keeper on a multi-token estate is then paid in proportion to the
+    //   estate's whole value instead of whatever token happened to be locked
+    //   first: an estate of 1 XLM and 100,000 USDC pays 1% of each, not 1% of
+    //   the XLM alone (#109).
+    //
+    // Rounding: a token too small for its share to round above zero
+    // contributes nothing; if *every* token rounds to zero, no bounty is paid
+    // at all and no beneficiary share is reduced — the tokens are distributed
+    // in full.
+    let mut bounty_plan: Map<Address, i128> = Map::new(env);
     if should_pay_bounty {
-        for (token_addr, total) in will.balances.iter() {
-            if total == 0 {
-                continue;
+        let targeted = will.keeper_bounty_token.as_ref().and_then(|bounty_token| {
+            let total = will.balances.get(bounty_token.clone()).unwrap_or(0);
+            if total > 0 {
+                Some((bounty_token.clone(), total))
+            } else {
+                None
             }
-            let amount = proportional_share(total, will.keeper_bounty_bps);
-            if amount > 0 {
-                bounty_token = Some((token_addr, amount));
-                break;
+        });
+        match targeted {
+            Some((token_addr, total)) => {
+                let amount = proportional_share(total, will.keeper_bounty_bps);
+                if amount > 0 {
+                    bounty_plan.set(token_addr, amount);
+                } else {
+                    collect_proportional_bounties(&mut bounty_plan, will);
+                }
             }
+            None => collect_proportional_bounties(&mut bounty_plan, will),
         }
     }
 
@@ -5458,24 +5912,15 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             continue;
         }
 
-        // Calculate bounty from first token's balance if applicable. The
-        // bounty is carved out of this token's balance *before* beneficiary
-        // shares are computed; paying it on top of a full distribution would
-        // spend funds belonging to other wills held by this contract (#458).
-        let mut token_bounty: i128 = 0;
-        if should_pay_bounty && !bounty_computed {
-            bounty_computed = true;
-            bounty_amount = proportional_share(total, will.keeper_bounty_bps);
-            token_bounty = bounty_amount;
-        }
-
         // Deduct the keeper bounty only from the token it was computed from.
         // Comparing the address (rather than relying on iteration position)
         // keeps the deduction and the payout tied to the same token (#378).
+        let mut token_bounty: i128 = 0;
         let mut available = total;
         if let Some((bounty_addr, bounty_amount)) = &bounty_token {
             if bounty_addr == &token_addr {
-                available = (total - bounty_amount).max(0);
+                token_bounty = *bounty_amount;
+                available = (total - token_bounty).max(0);
             }
         }
 
@@ -5527,19 +5972,49 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         }
 
         // A will with only `FixedAmount` beneficiaries has no percentage
-        // beneficiary to absorb the leftover (e.g. after a `top_up`). Give it
-        // to the final beneficiary instead of leaving it stranded in the
-        // contract once the balances map is cleared (#456).
-        if percentage_count == 0 && remaining > 0 && !shares.is_empty() {
-            let last = shares.len() - 1;
-            let (addr, share) = shares.get(last).unwrap();
-            shares.set(last, (addr, share + remaining));
+        // beneficiary to absorb the leftover (e.g. after a `top_up`). The
+        // remainder of *every* token is refunded to the will's owner (#383,
+        // documented in this function's "Leftover value" section) rather than
+        // being added to the final fixed-amount beneficiary's share: fixed
+        // allocations express the testator's exact intended amounts, and any
+        // excess was never allocated to anyone.
+        //
+        // This also resolves the double-allocation bug (#10): an earlier
+        // revision added `remaining` to `shares[last]` *and* queued the same
+        // amount in `refund_plan`, so a FixedAmount-only will with excess
+        // balance planned `total + remaining` tokens — panicking with
+        // `DistributionMismatch` or insolvently over-drawing the contract.
+        // The remainder is now queued exactly once, and only here.
+        //
+        // The refund is queued *before* the conservation check below so that
+        // `planned` can include it (#11): for a secondary token (fixed
+        // amounts are denominated in the primary token only, #384) `shares`
+        // is empty, and without the refund counted in `planned` the check
+        // could never reach `total` — it would panic and lock the whole
+        // estate in the contract forever.
+        let mut refund_amount: i128 = 0;
+        if percentage_count == 0 && remaining > 0 {
+            refund_amount = remaining;
+            refund_plan.push_back((token_addr.clone(), remaining));
         }
 
-        // Conservation check (#456): the planned payouts for this token must
-        // account for exactly its balance. Anything else means funds would be
-        // silently lost in, or over-drawn from, the contract.
+        // Conservation check: the planned payouts for this token must account
+        // for exactly its balance. Anything else means funds would be silently
+        // lost in, or over-drawn from, the contract. Owner-refund amounts are
+        // included via `refund_amount` so secondary-token balances satisfy the
+        // check without having any entries in `shares` (#11). The hashed
+        // reserve is also included: those tokens are not transferred to
+        // beneficiaries here but they are accounted for — they remain in
+        // `will.balances` (via `hashed_reserves`) for `reveal_and_claim` to
+        // draw from, so the full token balance is preserved across all paths.
+        let local_hashed_reserve = hashed_reserves.get(token_addr.clone()).unwrap_or(0);
         let mut planned: i128 = token_bounty;
+        if let Some(reserve) = hashed_reserves.get(token_addr.clone()) {
+            planned = match planned.checked_add(reserve) {
+                Some(v) => v,
+                None => panic_with_error!(env, WillError::DistributionMismatch),
+            };
+        }
         for (_, share) in shares.iter() {
             if share < 0 {
                 panic_with_error!(env, WillError::DistributionMismatch);
@@ -5549,16 +6024,16 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                 None => panic_with_error!(env, WillError::DistributionMismatch),
             };
         }
+        planned = match planned.checked_add(refund_amount) {
+            Some(v) => v,
+            None => panic_with_error!(env, WillError::DistributionMismatch),
+        };
+        planned = match planned.checked_add(local_hashed_reserve) {
+            Some(v) => v,
+            None => panic_with_error!(env, WillError::DistributionMismatch),
+        };
         if planned != total {
             panic_with_error!(env, WillError::DistributionMismatch);
-        }
-
-        // With no percentage beneficiaries there is nobody left to absorb what
-        // the fixed amounts did not claim. Refunding it to the owner keeps the
-        // tokens from being stranded in the contract with no accounting and no
-        // withdrawal path once the will is `Released` (#383).
-        if percentage_count == 0 && remaining > 0 {
-            refund_plan.push_back((token_addr.clone(), remaining));
         }
 
         transfer_plan.push_back((token_addr, shares));
@@ -5638,20 +6113,23 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         }
 
         // Pay the keeper bounty out of the very token it was computed from,
-        // whose balance was reduced to make room for it above (#378).
-        if let (Some((bounty_addr, bounty_amount)), Some(keeper_addr)) = (&bounty_token, keeper) {
-            if bounty_addr == &token_addr
-                && *bounty_amount > 0
-                && pay_or_record_failure(
-                    env,
-                    &token_addr,
-                    &contract_address,
-                    keeper_addr,
-                    *bounty_amount,
-                    will.id,
-                )
-            {
-                events::keeper_bounty_paid(env, will.id, keeper_addr, *bounty_amount);
+        // whose balance was reduced to make room for it above (#378). A
+        // proportional selection (#109) pays — and publishes — one bounty per
+        // token, in the token's own units.
+        if let Some(bounty_amount) = bounty_plan.get(token_addr.clone()) {
+            if bounty_amount > 0 {
+                if let Some(keeper_addr) = keeper {
+                    if pay_or_record_failure(
+                        env,
+                        &token_addr,
+                        &contract_address,
+                        keeper_addr,
+                        bounty_amount,
+                        will.id,
+                    ) {
+                        events::keeper_bounty_paid(env, will.id, keeper_addr, bounty_amount);
+                    }
+                }
             }
         }
     }

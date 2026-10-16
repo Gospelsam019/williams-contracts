@@ -44,3 +44,17 @@ path = "fuzz_targets/update_beneficiaries.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "merge_wills"
+path = "fuzz_targets/merge_wills.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "split_will"
+path = "fuzz_targets/split_will.rs"
+test = false
+doc = false
+bench = false

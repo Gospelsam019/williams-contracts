@@ -327,9 +327,24 @@ pub fn will_settings_updated(
 }
 
 /// Published when a keeper bounty is paid for calling trigger_will or release_inheritance.
+///
+/// With a proportional bounty selection (#109) one event is published per
+/// token the bounty was paid from; the per-token amounts are the data each
+/// token contributed, `floor(balance * keeper_bounty_bps / 10_000)`.
 pub fn keeper_bounty_paid(env: &Env, will_id: u64, keeper: &Address, amount: i128) {
     env.events()
         .publish((symbol_short!("bounty"), will_id), (keeper.clone(), amount));
+}
+
+/// Published when a will's keeper-bounty token is set or cleared via
+/// [`crate::WillContract::set_keeper_bounty_token`] (#109).
+///
+/// `Some(token)` concentrates the whole bounty on that token; `None` clears a
+/// previous selection and restores the default proportional split across every
+/// token the will holds.
+pub fn keeper_bounty_token_set(env: &Env, will_id: u64, token: &Option<Address>) {
+    env.events()
+        .publish((symbol_short!("bountytok"), will_id), token.clone());
 }
 
 /// Published when part of a released will's balance had no beneficiary left to

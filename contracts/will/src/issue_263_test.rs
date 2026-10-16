@@ -123,3 +123,66 @@ fn get_guardian_vote_status_returns_none_once_the_vote_expires() {
     env.ledger().with_mut(|l| l.timestamp += 8 * DAY);
     assert_eq!(client.get_guardian_vote_status(&will_id, &guardian_a), None);
 }
+
+#[test]
+fn get_guardian_votes_returns_all_cast_votes_and_reasons() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let guardian_a = Address::generate(&env);
+    let guardian_b = Address::generate(&env);
+    let token_address = env
+        .register_stellar_asset_contract_v2(owner.clone())
+        .address();
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_a.clone(), guardian_b.clone()],
+        &2,
+        &None,
+        &0,
+    );
+
+    client.accept_guardian_role(&will_id, &guardian_a);
+    client.accept_guardian_role(&will_id, &guardian_b);
+
+    assert_eq!(client.get_guardian_votes(&will_id).len(), 0);
+
+    // Advance past cooldown
+    env.ledger().with_mut(|l| l.timestamp += 8 * DAY);
+
+    // Guardian A votes with Incapacitated, Guardian B votes with Deceased (#38 trustless consensus model)
+    client.guardian_trigger(&will_id, &guardian_a, &GuardianVoteReason::Incapacitated);
+
+    let votes_1 = client.get_guardian_votes(&will_id);
+    assert_eq!(votes_1.len(), 1);
+    let (g_a, rec_a) = votes_1.get(0).unwrap();
+    assert_eq!(g_a, guardian_a);
+    assert_eq!(rec_a.reason, GuardianVoteReason::Incapacitated);
+
+    // Guardian B casts a conflicting reason (Deceased)
+    client.guardian_trigger(&will_id, &guardian_b, &GuardianVoteReason::Deceased);
+
+    let votes_2 = client.get_guardian_votes(&will_id);
+    assert_eq!(votes_2.len(), 2);
+    let (_, rec_b) = votes_2.get(1).unwrap();
+    assert_eq!(rec_b.reason, GuardianVoteReason::Deceased);
+}
+

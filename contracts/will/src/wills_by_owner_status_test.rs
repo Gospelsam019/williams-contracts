@@ -81,3 +81,42 @@ fn filters_wills_by_owner_and_status() {
     assert_eq!(page2.len(), 1);
     assert_ne!(page2.get(0).unwrap().id, p1_id);
 }
+
+#[test]
+fn test_get_owner_status_page() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_address = sac.address();
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &10_000_000);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+    let beneficiary = Address::generate(&env);
+
+    let will1 = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    let page = client.get_owner_status_page(&owner, &WillStatus::Active, &None, &10);
+    assert_eq!(page.wills.len(), 1);
+    assert_eq!(page.wills.get(0).unwrap().id, will1);
+    assert_eq!(page.total_count, 1);
+}
