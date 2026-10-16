@@ -82,6 +82,22 @@ gets its own [contract spec artifact](./spec) once exported.
   strictly ascending discriminant order (`1`–`53`), making the source easier to
   read and the per-code documentation easier to navigate. All discriminant
   values are unchanged, preserving strict backwards ABI compatibility (#50).
+- `cancel_will` no longer decrements `ProtocolStats.total_locked_by_token`
+  twice per token: `adjust_locked_for_balances` already iterates the balance
+  snapshot, and a redundant per-token loop deducted every cancelled will's
+  balance a second time, corrupting `get_protocol_stats` (#5).
+- `release_inheritance` no longer pre-decrements the protocol locked totals
+  before calling `distribute`, which applies the same decrement itself — each
+  release previously deducted twice and drove `total_locked_by_token`
+  negative (#6).
+- `split_will` increments `active_will_count` exactly once for the new child
+  will instead of twice, so the counter tracks the real number of live wills
+  again (#7).
+- `archive_will` now also accepts `Settled` wills (the status `close_will`
+  produces) and reports a `settled` reason in the `archived` event. Closed
+  wills previously could never be archived, trapping their rent-paying
+  storage entries; `WillError::WillNotSettled` documentation updated to
+  match (#8).
 
 ### Fixed
 - `renounce_beneficiary` redistribution now caps the percentage total at

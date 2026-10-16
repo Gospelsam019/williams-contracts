@@ -52,7 +52,8 @@ pub enum WillError {
     /// Token-list bounds are deliberately *not* reported here: an empty or
     /// over-long `tokens` list raises [`WillError::InvalidTokenCount`] (#390).
     TooManyBeneficiaries = 12,
-    /// The requested action requires the will to be `Released` or `Cancelled`.
+    /// The requested action requires the will to be `Released`, `Cancelled` or
+    /// `Settled` (a will closed via `close_will`).
     WillNotSettled = 13,
     /// Cannot merge: both wills must be owned by the same address.
     WillNotBothActive = 14,

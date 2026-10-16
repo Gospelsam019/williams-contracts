@@ -23,7 +23,7 @@ available discriminant; existing values are never changed.
 | 10 | `CheckinNotDue` | `trigger_will` was called before the check-in deadline passed. |
 | 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
 | 12 | `TooManyBeneficiaries` | A list-length cap was exceeded (beneficiaries, guardians, or batch spec list). |
-| 13 | `WillNotSettled` | The requested action requires the will to be `Released` or `Cancelled`. |
+| 13 | `WillNotSettled` | The requested action requires the will to be `Released`, `Cancelled` or `Settled`. |
 | 14 | `WillNotBothActive` | Cannot merge: one or both wills are not in `Active` status. |
 | 15 | `SameWillId` | Cannot merge: the same will id was provided for both wills. |
 | 16 | `MergeWouldExceedLimits` | Cannot merge: merging would result in too many beneficiaries or guardians. |
