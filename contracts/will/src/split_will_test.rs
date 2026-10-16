@@ -183,3 +183,78 @@ fn split_will_rejects_invalid_split_when_source_would_have_no_beneficiaries() {
         &vec![&env, (token_address, 10_000_i128)],
     );
 }
+
+/// Test asserting that unmodified guardian lists on child wills inherit source cooldown timestamps (#37).
+#[test]
+fn split_will_inherits_source_guardian_cooldown_timestamp() {
+    let (env, client, owner, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let guardian_a = Address::generate(&env);
+    let guardian_b = Address::generate(&env);
+
+    let created_at = env.ledger().timestamp();
+
+    let source_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                allocation: Allocation::Percentage(6_000),
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                allocation: Allocation::Percentage(4_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_a.clone(), guardian_b.clone()],
+        &2,
+        &None,
+        &0,
+    );
+
+    let source_before = client.get_will(&source_id);
+    assert_eq!(source_before.guardian_list_updated_at, created_at);
+
+    // Advance time past the 7-day cooldown (e.g. 10 days)
+    let ten_days = 10 * 86_400;
+    env.ledger().set_timestamp(created_at + ten_days);
+
+    let child_id = client.split_will(
+        &source_id,
+        &owner,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                allocation: Allocation::Percentage(6_000),
+            },
+        ],
+        &vec![&env, (token_address, 250_000_i128)],
+    );
+
+    let child = client.get_will(&child_id);
+    // Unmodified guardian list on child inherits the source timestamp, not `now`
+    assert_eq!(
+        child.guardian_list_updated_at,
+        created_at,
+        "child will must inherit source guardian_list_updated_at when guardian list is unmodified"
+    );
+
+    // Guardians accept roles on the child will
+    client.accept_guardian_role(&child_id, &guardian_a);
+    client.accept_guardian_role(&child_id, &guardian_b);
+
+    // Since the cooldown was inherited, guardians can trigger the child will immediately
+    // without encountering GuardianCooldownActive error
+    client.guardian_trigger(&child_id, &guardian_a, &crate::GuardianVoteReason::Deceased);
+    client.guardian_trigger(&child_id, &guardian_b, &crate::GuardianVoteReason::Deceased);
+
+    let child_after = client.get_will(&child_id);
+    assert_eq!(child_after.status, crate::WillStatus::Released);
+}
+

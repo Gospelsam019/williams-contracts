@@ -398,6 +398,29 @@ pub struct WillPage {
 }
 
 /// Reasons a guardian can provide when casting a trigger vote.
+///
+/// # Trustless Consensus Model & Informational Metadata
+///
+/// **Important**: `GuardianVoteReason` is purely **informational metadata**.
+/// There is **no on-chain consensus requirement** or agreement check among
+/// voting guardians. Two or more guardians can cast trigger votes with conflicting
+/// reasons (e.g. Guardian A votes `Deceased` while Guardian B votes `Incapacitated`
+/// or `Other`), and quorum is reached immediately once the accumulated vote weight
+/// satisfies the threshold without requiring agreement on the reason.
+///
+/// The contract enforces threshold-based authorization, not semantic consensus
+/// over the real-world condition of the owner.
+///
+/// ## Off-Chain Auditing Patterns
+///
+/// Because on-chain consensus on reasons is deliberately not enforced, off-chain
+/// indexers, legal executors, and auditing systems should:
+/// 1. Query all cast guardian votes and reasons via [`crate::WillContract::get_guardian_votes`]
+///    or individual votes via [`crate::WillContract::get_guardian_vote_status`].
+/// 2. Audit the reason metadata for conflicting claims across guardians.
+/// 3. Flag any discrepancies (e.g. conflicting `Deceased` vs `Unreachable` votes)
+///    for manual inspection or off-chain legal verification before taking irrevocable
+///    real-world legal actions.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuardianVoteReason {

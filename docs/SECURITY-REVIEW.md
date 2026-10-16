@@ -162,6 +162,23 @@ Will IDs are sequential starting from 1. An attacker could enumerate all wills b
 
 **Recommendation:** Consider adding pagination parameters for production use.
 
+### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium — Operational Assumption / Threat Model)
+
+**Location:** `create_will`, `top_up`, `distribute`, `cancel_will`
+
+Williams assumes that token transfers are 1:1 lossless (`balance_transferred == amount`). When tokens are deposited into the contract:
+```rust
+token::Client::new(&env, &token_addr).transfer(&owner, &contract_address, &amount);
+balances.set(token_addr, prev + amount);
+```
+The internal accounting assumes the contract's actual balance increased by exactly `amount`.
+
+**Impact:** If a token charges a transfer tax or burns a portion upon transfer (fee-on-transfer or deflationary mechanics), the contract receives `amount - fee` but records `amount`. At release time (`release_inheritance` or `guardian_trigger`), `distribute` attempts to pay out allocations calculated from the recorded balance. The final transfer will fail due to insufficient contract balance, or trigger `DistributionMismatch`, causing the distribution to fail and locking custodied funds.
+
+**Recommendation & Threat Model Resolution:**
+- Clearly document that standard SEP-41 tokens without transfer fees are required in `README.md` and `SECURITY.md`.
+- Integrators and users must ensure that no fee-on-transfer or deflationary tokens are used with Williams.
+
 ---
 
 ## 5. Summary
@@ -171,6 +188,7 @@ Will IDs are sequential starting from 1. An attacker could enumerate all wills b
 | Reentrancy | Critical | 0 | N/A |
 | Authorization Bypass | Critical | 0 | N/A |
 | Integer Overflow/Underflow | Critical | 0 | N/A |
+| Fee-on-Transfer Tokens | Medium | 1 | Documented / Protocol Assumption |
 | Token Trust | Low | 1 | Accepted |
 | Guardian Collusion | Low | 1 | By Design |
 | Front-Running | Low | 1 | By Design |
@@ -179,6 +197,7 @@ Will IDs are sequential starting from 1. An attacker could enumerate all wills b
 | Query Exhaustion | Low | 1 | Informational |
 
 **Overall Assessment:** The contract is secure against all critical vulnerability classes. No high-severity issues were found. All low-severity findings are either by design, informational, or accepted trade-offs.
+
 
 ---
 
