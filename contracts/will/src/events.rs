@@ -469,3 +469,26 @@ pub fn payout_retried(env: &Env, will_id: u64, token: &Address, recipient: &Addr
         (token.clone(), recipient.clone(), amount),
     );
 }
+
+/// Published when `redirect_failed_payout` moves a recorded failed payout
+/// from one recipient to another under the authorization of the original
+/// recipient or the will's owner (#19). The amount is unchanged; a later
+/// `retry_failed_payout` for `new_recipient` delivers it there instead.
+pub fn payout_redirected(
+    env: &Env,
+    will_id: u64,
+    token: &Address,
+    old_recipient: &Address,
+    new_recipient: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("payredir"), will_id),
+        (
+            token.clone(),
+            old_recipient.clone(),
+            new_recipient.clone(),
+            amount,
+        ),
+    );
+}

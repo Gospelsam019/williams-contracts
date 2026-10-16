@@ -40,6 +40,9 @@ data, in order.
 | `batch` | `batch_create_wills` (second topic is `owner`) | `will_ids: Vec<u64>` |
 | `split` | `split_will` (topic is the original id) | `(new_id: u64, owner: Address, split_amount: i128)` |
 | `hclaim` | `reveal_and_claim` | `(claimant: Address, amount: i128)` |
+| `payfail` | `distribute`, `reveal_and_claim` (failed transfer) | `(token: Address, recipient: Address, amount: i128)` |
+| `payretry` | `retry_failed_payout` | `(token: Address, recipient: Address, amount: i128)` |
+| `payredir` | `redirect_failed_payout` | `(token: Address, old_recipient: Address, new_recipient: Address, amount: i128)` |
 
 ## `archived`
 
@@ -54,6 +57,19 @@ returns `WillNotFound` and the will no longer shows up in `get_wills_by_owner`,
   `released`, `cancelled` or `settled`.
 
 Indexers should treat this as the will's final lifecycle event.
+
+## `periodu`
+
+`update_periods` publishes this event whenever the owner updates a will's check-in or
+grace periods. Because `update_periods` resets `last_checkin` to the current transaction
+timestamp (`now`), `next_deadline` is always a valid future deadline computed as
+`now + checkin_period_days * 86_400`. Off-chain indexers and user interfaces are guaranteed
+never to receive a stale or historical timestamp.
+
+- `owner`: the will's owner.
+- `checkin_period_days`: updated check-in period in days.
+- `grace_period_days`: updated grace period in days.
+- `next_deadline`: ledger timestamp (Unix seconds) for the next check-in deadline (`now + checkin_period_days * 86_400`), guaranteed to be strictly in the future.
 
 ## Failed operations
 

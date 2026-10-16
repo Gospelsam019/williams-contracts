@@ -54,7 +54,7 @@ pub enum GuardianConsent {
     Pending = 0,
     /// Guardian has accepted the role and may vote.
     Accepted = 1,
-    /// Guardian has declined the role.
+    /// Guardian has declined the role (can be reset to Pending by the owner via reset_guardian_consent).
     Rejected = 2,
 }
 

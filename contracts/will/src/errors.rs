@@ -238,10 +238,22 @@ pub enum WillError {
     /// overflow in extreme fuzz or adversarial scenarios. All deadline and
     /// period arithmetic goes through checked helpers that panic with this
     /// error rather than wrapping silently (#16).
+    ///
+    /// Historically numbered 54; renumbered to 55 because code 54 had already
+    /// been claimed by [`WillError::ConfirmationWindowNotExpired`] by the time
+    /// the variant was restored to the enum (#751-style renumbering).
     ArithmeticOverflow = 55,
     /// `set_keeper_bounty_token` was called with a token the will does not
     /// currently hold. The bounty is carved out of a balance the will holds,
     /// so naming any other token could never pay from it and would silently
     /// degrade to no bounty at all (#109).
+    ///
+    /// Historically numbered 54; renumbered to 56 because code 54 had already
+    /// been claimed by [`WillError::ConfirmationWindowNotExpired`] by the time
+    /// the variant was restored to the enum (see [`Self::ArithmeticOverflow`]).
     InvalidBountyToken = 56,
+    /// `redirect_failed_payout` was called by an address that is neither the
+    /// recorded failed-payout recipient nor the will's owner. Only those two
+    /// parties may move a stalled payout to a recovery address (#19).
+    NotAuthorized = 57,
 }

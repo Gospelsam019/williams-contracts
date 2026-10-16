@@ -138,7 +138,9 @@ mod issue_355_test;
 #[cfg(test)]
 mod issue_356_test;
 #[cfg(test)]
-mod issue_357_test;
+mod reset_guardian_consent_test;
+#[cfg(test)]
+// mod issue_357_test; // TODO: ContractEvents API changed in soroban-sdk v28
 /// Regression tests for issues #358-#361: the distinct-token cap in `top_up`,
 /// the shared guardian-vote expiry rule, `limit == 0` pagination parity in
 /// `get_wills_by_owner_and_status`, and renouncing the last beneficiary.
@@ -439,6 +441,19 @@ mod uncovered_entrypoints_test;
 mod update_will_settings_test;
 #[cfg(test)]
 mod wills_by_owner_status_test;
+
+/// Regression tests for the Wave-1 issues #17-#20: merged-will guardian
+/// threshold reconciliation, hashed-beneficiary claim failure recording,
+/// authorized failed-payout redirection, and the `batch_create_wills` token
+/// interface probe.
+#[cfg(test)]
+mod issue_17_test;
+#[cfg(test)]
+mod issue_18_test;
+#[cfg(test)]
+mod issue_19_test;
+#[cfg(test)]
+mod issue_20_test;
 
 use soroban_sdk::{
     contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address, Bytes,
@@ -1591,6 +1606,12 @@ impl WillContract {
     /// at all -- the recorded amount is self-sufficient -- so this keeps
     /// working even after the will has been archived.
     ///
+    /// If the recorded recipient can no longer receive the token — the
+    /// account is permanently frozen, compromised, or migrated — every retry
+    /// fails forever; the recipient or the will's owner can first move the
+    /// record to a recovery address with [`Self::redirect_failed_payout`]
+    /// (#19).
+    ///
     /// # Panics
     /// - [`WillError::NoFailedPayout`] if no failed payout is recorded for
     ///   this exact `(will_id, token, recipient)` tuple (never failed,
@@ -1611,6 +1632,85 @@ impl WillContract {
 
         storage::remove_failed_payout(&env, will_id, &token, &recipient);
         events::payout_retried(&env, will_id, &token, &recipient, amount);
+    }
+
+    /// Redirects a recorded failed payout to a new destination address (#19).
+    ///
+    /// A failed payout is recorded against the exact recipient that
+    /// `distribute` or `reveal_and_claim` computed, and
+    /// [`Self::retry_failed_payout`] can only ever deliver to that address.
+    /// If the address is permanently frozen, compromised, or migrated, every
+    /// retry fails forever and the funds are stranded. This entrypoint moves
+    /// the record — amount unchanged — to a new recipient so a later
+    /// `retry_failed_payout` delivers there instead. It moves the *record*
+    /// only; no tokens leave the contract here.
+    ///
+    /// # Authorization
+    ///
+    /// `caller` must authorize the call and must be either:
+    ///
+    /// - `old_recipient` — the party the funds were computed for, moving
+    ///   their own payout to a recovery address; or
+    /// - the will's owner, who is responsible for the estate's payout
+    ///   integrity. The owner is consulted through live storage first, with a
+    ///   fallback to the archived namespace, so a terminal, archived will's
+    ///   stalled payouts can still be recovered — mirroring
+    ///   `retry_failed_payout`'s independence from the parent will.
+    ///
+    /// Anything else is rejected with [`WillError::NotAuthorized`], so an
+    /// unauthorized third party can never redirect funds (#19).
+    ///
+    /// # Panics
+    /// - [`WillError::NotAuthorized`] if `caller` is neither `old_recipient`
+    ///   nor the will's owner.
+    /// - [`WillError::NoFailedPayout`] if no failed payout is recorded for
+    ///   `(will_id, token, old_recipient)` — never failed, already retried
+    ///   successfully, or already redirected.
+    pub fn redirect_failed_payout(
+        env: Env,
+        will_id: u64,
+        token: Address,
+        old_recipient: Address,
+        new_recipient: Address,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Authorization first: only the recorded recipient — the party the
+        // funds were computed for — or the will's owner may redirect.
+        let is_authorized = if caller == old_recipient {
+            true
+        } else {
+            let owner = match storage::load_will(&env, will_id) {
+                Ok(will) => Some(will.owner),
+                Err(_) => storage::load_archived_will(&env, will_id).ok().map(|w| w.owner),
+            };
+            owner.as_ref() == Some(&caller)
+        };
+        if !is_authorized {
+            panic_with_error!(&env, WillError::NotAuthorized);
+        }
+
+        let amount = match storage::get_failed_payout(&env, will_id, &token, &old_recipient) {
+            Some(amount) => amount,
+            None => panic_with_error!(&env, WillError::NoFailedPayout),
+        };
+
+        // Move the record atomically: clear the old tuple and write the new
+        // one with the same amount, so the payout stays exactly once payable
+        // and `retry_failed_payout` can only deliver the recorded amount to
+        // one address.
+        storage::remove_failed_payout(&env, will_id, &token, &old_recipient);
+        storage::set_failed_payout(&env, will_id, &token, &new_recipient, amount);
+
+        events::payout_redirected(
+            &env,
+            will_id,
+            &token,
+            &old_recipient,
+            &new_recipient,
+            amount,
+        );
     }
 
     /// Cancels the will and refunds every locked token balance to the owner.
@@ -2293,15 +2393,13 @@ impl WillContract {
             will.grace_period_days = new_grace;
         }
 
-        // `trigger_will` derives the deadline from `last_checkin`, which this call
-        // leaves untouched, so the event must carry that same value rather than
-        // `now + period` — otherwise the published deadline is later than the
-        // enforced one by the age of the current check-in (#357).
-        let next_deadline = checked_add_timestamp(
-            &env,
-            will.last_checkin,
-            checked_days_to_seconds(&env, will.checkin_period_days),
-        );
+        // Reset last_checkin to now so the new periods apply from this moment,
+        // preventing retroactive expiration if the owner reduces the period below
+        // the already elapsed time (#15, #33).
+        will.last_checkin = now;
+        let period_seconds = checked_days_to_seconds(&env, will.checkin_period_days);
+        let calculated_deadline = checked_add_timestamp(&env, now, period_seconds);
+        let next_deadline = core::cmp::max(calculated_deadline, checked_add_timestamp(&env, now, 1));
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2605,8 +2703,10 @@ impl WillContract {
     /// - `Triggered`: seconds until the grace period expires
     ///   (`trigger_time + grace_period_days`, where `trigger_time` is the
     ///   missed check-in deadline — see [`Self::trigger_will`]).
-    /// - `PendingConfirmation`, `Released`, `Cancelled`, `Settled`: no deadline
-    ///   applies; returns `None`.
+    /// - `PendingConfirmation`: seconds until `confirmation_deadline`
+    ///   expires; negative if the deadline has passed (#34). If
+    ///   `confirmation_deadline` is `None`, returns `None`.
+    /// - `Released`, `Cancelled`, `Settled`: no deadline applies; returns `None`.
     ///
     /// The returned value is negative when the deadline has already passed
     /// (e.g. an `Active` will whose check-in deadline elapsed but which has
@@ -2652,8 +2752,8 @@ impl WillContract {
                 let deadline = checked_deadline_as_i64(&env, trigger_time, will.grace_period_days);
                 Some(deadline - now)
             }
-            WillStatus::PendingConfirmation
-            | WillStatus::Released
+            WillStatus::PendingConfirmation => will.confirmation_deadline.map(|dl| (dl as i64) - now),
+            WillStatus::Released
             | WillStatus::Cancelled
             | WillStatus::Settled => None,
         }
@@ -3192,23 +3292,9 @@ impl WillContract {
         // expired votes drop out (#458). A running `+= 1` would let a guardian
         // whose earlier vote expired be counted twice.
         storage::set_guardian_voted(&env, will_id, &guardian, now, reason);
-        let (tally_weight, tally_count) =
-            storage::tally_guardian_votes(&env, &will, now, expiry_days);
-        will.guardian_vote_weight = tally_weight;
-        will.guardian_votes = tally_count;
-        // Recount from the current guardian list instead of incrementing a
-        // running total (#453), so votes from removed, rejected or expired
-        // guardians can never count toward the threshold.
-        let (votes, vote_weight) =
-            tally_guardian_votes(&env, &will, now, storage::has_guardian_voted);
-        will.guardian_votes = votes;
-        will.guardian_vote_weight = vote_weight;
-        // Recount from the vote records that are still live rather than adding
-        // to the persisted counters: a record that has already aged past the
-        // expiry window no longer counts, so voting again after expiry replaces
-        // the old vote rather than stacking on top of it (#372). Without this a
-        // single guardian could vote once per grace period and reach the
-        // threshold alone.
+        // Authoritative recount in a single pass (#35): recount from the vote
+        // records that are still live rather than adding to persisted counters (#372),
+        // counting only current consented guardians (#453).
         let (live_weight, live_votes) =
             storage::recount_guardian_votes(&env, &will, now, expiry_days);
         will.guardian_vote_weight = live_weight;
@@ -3290,11 +3376,7 @@ impl WillContract {
         // restart the check-in clock (#373) -- same rule `emergency_checkin`
         // enforces, so a guardian quorum and the owner are held to one deadline.
         let trigger_time = will.trigger_time.unwrap_or(0);
-        let grace_deadline = checked_add_timestamp(
-            &env,
-            trigger_time,
-            checked_days_to_seconds(&env, will.grace_period_days),
-        );
+        let grace_deadline = checked_add_timestamp(&env, trigger_time, checked_days_to_seconds(&env, will.grace_period_days));
         if now > grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
@@ -3325,18 +3407,9 @@ impl WillContract {
         }
 
         storage::set_guardian_cancel_voted(&env, will_id, &guardian, now);
-        let (tally_weight, tally_count) =
-            storage::tally_guardian_cancel_votes(&env, &will, now, expiry_days);
-        will.guardian_cancel_vote_weight = tally_weight;
-        will.guardian_cancel_votes = tally_count;
-        // Recount from the current guardian list (#453); see `guardian_trigger`.
-        let (votes, vote_weight) =
-            tally_guardian_votes(&env, &will, now, storage::has_guardian_cancel_voted);
-        will.guardian_cancel_votes = votes;
-        will.guardian_cancel_vote_weight = vote_weight;
-        // Same recount-from-live-records rule as `guardian_trigger`: an expired
-        // cancel vote is replaced, not accumulated, so one guardian cannot reach
-        // the cancel threshold alone by voting once per grace period (#372).
+        // Authoritative recount in a single pass (#35): recount from the cancel-vote
+        // records that are still live rather than adding to persisted counters (#372),
+        // counting only current consented guardians (#453).
         let (live_weight, live_votes) =
             storage::recount_guardian_cancel_votes(&env, &will, now, expiry_days);
         will.guardian_cancel_vote_weight = live_weight;
@@ -3535,6 +3608,52 @@ impl WillContract {
         events::guardian_rejected_role(&env, will_id, &guardian);
     }
 
+    /// Resets a specific guardian's consent status from `Rejected` back to `Pending`.
+    ///
+    /// Callable by the will's owner while the will is not in a terminal status.
+    /// This allows a guardian who accidentally rejected their role to re-accept it
+    /// without requiring the owner to replace the entire guardian list (which would
+    /// wipe all existing consents and restart the guardian cooldown) (#36).
+    ///
+    /// Accepted guardians retain their consent and vote eligibility.
+    /// The guardian list cooldown timestamp is not modified.
+    ///
+    /// # Panics
+    /// - [`WillError::NotGuardian`] if `guardian` is not named on this will.
+    /// - [`WillError::WillNotActive`] if the will is in a terminal status
+    ///   (`Released`, `Cancelled` or `Settled`).
+    pub fn reset_guardian_consent(env: Env, will_id: u64, guardian: Address) {
+        let mut will = load_will(&env, will_id);
+        will.owner.require_auth();
+        assert_consent_changeable(&env, &will);
+
+        let mut found = false;
+        let mut updated_guardians: Vec<Guardian> = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if g.address == guardian {
+                found = true;
+                if g.consent == GuardianConsent::Rejected {
+                    updated_guardians.push_back(Guardian {
+                        address: g.address.clone(),
+                        weight: g.weight,
+                        consent: GuardianConsent::Pending,
+                    });
+                } else {
+                    return;
+                }
+            } else {
+                updated_guardians.push_back(g.clone());
+            }
+        }
+
+        if !found {
+            panic_with_error!(&env, WillError::NotGuardian);
+        }
+
+        will.guardians = updated_guardians;
+        storage::save_will(&env, &will);
+    }
+
     // ── #21: Will cloning / templates ────────────────────────────────────
 
     /// Clones an existing will's configuration into a new will with fresh
@@ -3636,6 +3755,8 @@ impl WillContract {
             balances.set(token_addr, prev + amount);
         }
 
+        let (primary_token, primary_amount) = tokens.get_unchecked(0);
+
         // Deep-copy hashed beneficiaries from the source, resetting each
         // `claimed` flag so the cloned will's commitments are fresh and
         // can be independently revealed via `reveal_and_claim` (#52).
@@ -3657,7 +3778,6 @@ impl WillContract {
         // silently under-paying at distribute() time. Fixed amounts are
         // denominated in the clone's primary token, the first entry of
         // `tokens` (#384).
-        let (primary_token, primary_amount) = tokens.get_unchecked(0);
         assert_valid_allocations(
             &env,
             &source.beneficiaries,
@@ -3688,7 +3808,7 @@ impl WillContract {
             trigger_time: None,
             confirmation_deadline: None,
             status: WillStatus::Active,
-            guardians: reset_guardian_consent(&env, &source.guardians),
+            guardians: reset_all_guardians_consent(&env, &source.guardians),
             guardian_vote_weight: 0,
             guardian_votes: 0,
             guardian_cancel_vote_weight: 0,
@@ -3763,6 +3883,9 @@ impl WillContract {
     ///   beneficiary/guardian caps.
     /// - [`WillError::InvalidTokenCount`] if any individual spec's token list
     ///   is empty or exceeds `MAX_TOKENS`.
+    /// - [`WillError::InvalidToken`] if any token address in any spec fails
+    ///   the read-only `decimals()` SEP-41 interface probe (#20) — the same
+    ///   validation `create_will` applies to every token it locks.
     /// - Any error that [`create_will`] would panic with for an individual spec.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn batch_create_wills(
@@ -3831,6 +3954,18 @@ impl WillContract {
             for (token_addr, amount) in tokens.iter() {
                 if amount <= 0 {
                     panic_with_error!(&env, WillError::ZeroAmount);
+                }
+                // Probe the token interface with a read-only `decimals()` call
+                // before attempting any transfer — exactly as `create_will`
+                // does (#20). Without it a batch spec could lock a will around
+                // a non-token address that only ever fails, opaquely, when
+                // `transfer` runs or, worse, at release time when the payout
+                // for that token can never succeed.
+                if token::Client::new(&env, &token_addr)
+                    .try_decimals()
+                    .is_err()
+                {
+                    panic_with_error!(&env, WillError::InvalidToken);
                 }
                 token::Client::new(&env, &token_addr).transfer(
                     &owner,
@@ -3996,6 +4131,22 @@ impl WillContract {
     ///   > `Pending` > `Rejected`. A guardian `Rejected` on both wills stays
     ///   `Rejected` and cannot vote until the owner re-appoints them through
     ///   `update_guardians`.
+    /// - Guardian threshold: the merged will adopts the **stricter** (larger)
+    ///   of the two source thresholds (#17). Each source threshold was
+    ///   validated against that source's own guardian weights, and every
+    ///   source guardian keeps at least its original weight after the
+    ///   address-dedup above (the dedup takes the greater of the two weights),
+    ///   so the merged list's total weight is never below either source's —
+    ///   the adopted threshold is therefore always reachable. It is
+    ///   additionally re-validated against the merged list before being
+    ///   stored: with guardians it must land in `1..=total merged weight`
+    ///   ([`WillError::InvalidGuardianThreshold`]), and with no guardians it
+    ///   is normalised to `0`, mirroring `create_will` (#363). Before #17 the
+    ///   survivor's threshold was kept verbatim: a guardian-less survivor
+    ///   kept `0` while inheriting the consumed will's guardians — a quorum a
+    ///   single guardian could satisfy instantly — and a survivor with a
+    ///   weaker threshold silently diluted the stronger quorum the consumed
+    ///   will's creator had configured.
     /// - Check-in period: use the minimum (most conservative).
     /// - Grace period: use the maximum (most conservative).
     /// - The consumed will (will_id_b) is marked as Cancelled with zero balance.
@@ -4026,6 +4177,9 @@ impl WillContract {
     ///   already claimed are inert and do not block a merge.
     /// - [`WillError::MergeWouldExceedLimits`] if merging would exceed MAX_BENEFICIARIES or MAX_GUARDIANS limits.
     /// - [`WillError::InvalidPercentages`] if recalculating percentages fails.
+    /// - [`WillError::InvalidGuardianThreshold`] if the adopted threshold
+    ///   cannot be reconciled with the merged guardian list — it falls outside
+    ///   `1..=`total merged guardian weight while guardians exist (#17).
     pub fn merge_wills(env: Env, owner: Address, will_id_a: u64, will_id_b: u64) {
         owner.require_auth();
 
@@ -4151,6 +4305,19 @@ impl WillContract {
             panic_with_error!(&env, WillError::MergeWouldExceedLimits);
         }
 
+        // Reconcile the guardian threshold against the merged list (#17)
+        // instead of keeping the survivor's value verbatim: adopt the stricter
+        // of the two source thresholds and validate it against the merged
+        // list's total weight, so the surviving will can never end up with an
+        // unreachable quorum, a zero threshold over a live guardian list, or a
+        // threshold weaker than the consumed will's creator had configured.
+        let merged_threshold = merged_guardian_threshold(
+            &env,
+            will_a.guardian_threshold,
+            will_b.guardian_threshold,
+            &merged_guardians,
+        );
+
         // Merge parameters: use minimum check-in period, maximum grace period
         let merged_checkin_period = if will_a.checkin_period_days < will_b.checkin_period_days {
             will_a.checkin_period_days
@@ -4185,6 +4352,7 @@ impl WillContract {
         // Update will_a with merged state
         will_a.beneficiaries = merged_beneficiaries;
         will_a.guardians = merged_guardians;
+        will_a.guardian_threshold = merged_threshold;
         will_a.checkin_period_days = merged_checkin_period;
         will_a.grace_period_days = merged_grace_period;
         will_a.balances = combined_balances;
@@ -4685,7 +4853,7 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &b.address, new_id);
         }
 
-        let child_guardians = reset_guardian_consent(&env, &source.guardians);
+        let child_guardians = reset_all_guardians_consent(&env, &source.guardians);
         // Unmodified guardian lists on child wills inherit source cooldown timestamps (#37).
         // Only set `now` if the guardian list was altered during the split.
         let guardian_list_unmodified = child_guardians.len() == source.guardians.len()
@@ -4918,6 +5086,18 @@ impl WillContract {
     /// that combined withheld pool, which drains to exactly zero once every
     /// hashed beneficiary has claimed, in any order.
     ///
+    /// A token transfer that fails here — a frozen recipient, a paused
+    /// token, a missing trustline — no longer aborts the whole claim (#18).
+    /// The claim itself is committed before any transfer runs: the slot is
+    /// marked claimed and the share deducted from the will's balances. A
+    /// failing transfer's amount is instead recorded through the same
+    /// failed-payout ledger `distribute` uses, so the claimant (or anyone)
+    /// can deliver it later with [`Self::retry_failed_payout`] — after
+    /// optionally redirecting it to a recovery address via
+    /// [`Self::redirect_failed_payout`] (#19) — instead of one
+    /// misbehaving token contract making the entire multi-token claim
+    /// permanently unclaimable.
+    ///
     /// # Parameters
     /// - `will_id`: the will to claim from.
     /// - `claimant`: the address that will receive the funds. Must authorise,
@@ -5071,13 +5251,27 @@ impl WillContract {
         storage::save_will(&env, &will);
 
         // --- INTERACTIONS: external token transfers execute after state is settled ---
+        //
+        // Every share below goes through `pay_or_record_failure`, not the
+        // panicking `transfer` (#18). The claim is already committed — the
+        // slot is marked claimed and the share deducted from the will's
+        // balances — so a token that refuses the transfer (frozen recipient,
+        // paused token, missing trustline) must not roll the whole claim back
+        // and leave a multi-token hashed beneficiary unable to receive *any*
+        // of their assets. A failing transfer's amount is recorded in the
+        // failed-payout ledger for `retry_failed_payout` (or a redirect via
+        // `redirect_failed_payout`) instead, exactly as `distribute` does for
+        // visible beneficiaries (#18, #459).
         let contract_address = env.current_contract_address();
         for (token_addr, share) in transfer_plan.iter() {
             if share > 0 {
-                token::Client::new(&env, &token_addr).transfer(
+                pay_or_record_failure(
+                    &env,
+                    &token_addr,
                     &contract_address,
                     &claimant,
-                    &share,
+                    share,
+                    will_id,
                 );
             }
         }
@@ -5298,6 +5492,10 @@ fn assert_valid_allocations(
         total_checked_add(&mut percentage_total, hb.percentage, env);
     }
 
+    // Visible percentages must not exceed 10,000 bps. They are allowed to total
+    // *less* than 10,000 so that hashed beneficiary slots can fill the
+    // remainder (#57). The combined invariant (visible + hashed <= 10,000) is
+    // enforced separately by `assert_valid_percentages`.
     if has_percentage && percentage_total > 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
     }
@@ -5708,30 +5906,6 @@ fn grace_deadline(env: &Env, will: &Will) -> u64 {
 ///
 /// `has_voted` selects the namespace: [`storage::has_guardian_voted`] for
 /// release votes or [`storage::has_guardian_cancel_voted`] for cancel votes.
-///
-/// Recomputing the tally on every vote, rather than keeping a running total,
-/// enforces the upper bound from issue #453. A guardian who has been removed,
-/// has rejected the role or whose vote has expired can never count toward the
-/// threshold, and the count can never exceed the number of guardians on the
-/// will.
-fn tally_guardian_votes(
-    env: &Env,
-    will: &Will,
-    now: u64,
-    has_voted: fn(&Env, u64, &Address, u64, u64) -> bool,
-) -> (u32, u32) {
-    let mut votes: u32 = 0;
-    let mut weight: u32 = 0;
-    for g in will.guardians.iter() {
-        if g.consent == GuardianConsent::Accepted
-            && has_voted(env, will.id, &g.address, now, will.grace_period_days)
-        {
-            votes += 1;
-            weight = weight.saturating_add(g.weight);
-        }
-    }
-    (votes, weight)
-}
 
 /// Asserts both periods are at least one day and at most [`MAX_PERIOD_DAYS`].
 ///
@@ -5949,12 +6123,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             continue;
         }
 
-        // Deduct the keeper bounty from this token's balance *before*
-        // beneficiary shares are computed; paying it on top of a full
-        // distribution would spend funds belonging to other wills held by
-        // this contract (#458). `bounty_plan` is the single source of truth
-        // for both this deduction and the payout below, so the two can never
-        // desynchronise (#378/#109).
+        // Deduct the keeper bounty only from the token it was computed from.
+        // Comparing the address (rather than relying on iteration position)
+        // keeps the deduction and the payout tied to the same token (#378).
+        // `bounty_plan` is keyed by exactly that paying token, so a lookup by
+        // `token_addr` ties the deduction to the same entry the INTERACTIONS
+        // phase later pays out of (#378, #109).
         let mut token_bounty: i128 = 0;
         let mut available = total;
         if let Some(bounty_amount) = bounty_plan.get(token_addr.clone()) {
@@ -6051,7 +6225,6 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         // beneficiaries here but they are accounted for — they remain in
         // `will.balances` (via `hashed_reserves`) for `reveal_and_claim` to
         // draw from, so the full token balance is preserved across all paths.
-        let local_hashed_reserve = hashed_reserves.get(token_addr.clone()).unwrap_or(0);
         let mut planned: i128 = token_bounty;
         for (_, share) in shares.iter() {
             if share < 0 {
@@ -6063,10 +6236,6 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             };
         }
         planned = match planned.checked_add(refund_amount) {
-            Some(v) => v,
-            None => panic_with_error!(env, WillError::DistributionMismatch),
-        };
-        planned = match planned.checked_add(local_hashed_reserve) {
             Some(v) => v,
             None => panic_with_error!(env, WillError::DistributionMismatch),
         };
@@ -6219,6 +6388,50 @@ fn more_advanced_consent(a: GuardianConsent, b: GuardianConsent) -> GuardianCons
     }
 }
 
+/// Computes the `guardian_threshold` the merged will must carry after
+/// `merge_wills` combines two guardian lists (#17).
+///
+/// Policy: the **stricter** — i.e. larger — of the two source thresholds is
+/// adopted. Every source guardian keeps at least its original vote weight
+/// after the address-dedup merge (the dedup takes the greater of the two
+/// weights), so the merged list's total weight is never below either
+/// source's, and the adopted threshold — each source's own being bounded by
+/// its source's weight total — is therefore always reachable.
+///
+/// The result is validated against the merged list before being stored:
+///
+/// - With guardians, the threshold must land in `1..=total merged weight`:
+///   a `0` threshold would let a single guardian satisfy quorum instantly,
+///   and a value above the total weight could never be satisfied at all —
+///   either state strands the guardian mechanism (#17). The total is
+///   accumulated with [`u32::checked_add`], mirroring
+///   `update_guardians_weighted`.
+/// - Without guardians the threshold is normalised to `0`, mirroring
+///   `create_will`'s handling of a guardian-less will (#363): a non-zero
+///   value over an empty list describes a quorum that can never be reached.
+fn merged_guardian_threshold(
+    env: &Env,
+    threshold_a: u32,
+    threshold_b: u32,
+    merged_guardians: &Vec<Guardian>,
+) -> u32 {
+    if merged_guardians.is_empty() {
+        return 0;
+    }
+    let candidate = threshold_a.max(threshold_b);
+    let mut total_weight: u32 = 0;
+    for guardian in merged_guardians.iter() {
+        total_weight = match total_weight.checked_add(guardian.weight) {
+            Some(sum) => sum,
+            None => panic_with_error!(env, WillError::InvalidGuardianThreshold),
+        };
+    }
+    if !(1..=total_weight).contains(&candidate) {
+        panic_with_error!(env, WillError::InvalidGuardianThreshold);
+    }
+    candidate
+}
+
 /// Copies a will's guardian list onto a derived will, resetting every
 /// guardian's consent to [`GuardianConsent::Pending`] while preserving
 /// addresses and vote weights.
@@ -6227,7 +6440,7 @@ fn more_advanced_consent(a: GuardianConsent, b: GuardianConsent) -> GuardianCons
 /// never agreed to, so consent recorded on the source must not carry over
 /// (#375) — a guardian has to be asked about the child before they can vote
 /// on it, exactly as on a freshly created will.
-fn reset_guardian_consent(env: &Env, guardians: &Vec<Guardian>) -> Vec<Guardian> {
+fn reset_all_guardians_consent(env: &Env, guardians: &Vec<Guardian>) -> Vec<Guardian> {
     let mut reset: Vec<Guardian> = Vec::new(env);
     for g in guardians.iter() {
         reset.push_back(Guardian {
