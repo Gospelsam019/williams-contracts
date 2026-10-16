@@ -539,6 +539,10 @@ const BATCH_MAX: u32 = 10;
 /// before attempting something malicious.
 const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
 
+/// Grace margin in days after the confirmation window expires before
+/// `refund_unconfirmed_will` can be called to return trapped funds (#40).
+pub const UNCONFIRMED_WILL_REFUND_GRACE_DAYS: u64 = 7;
+
 /// Maximum keeper bounty in basis points (100 bps = 1%).
 const MAX_KEEPER_BOUNTY_BPS: u32 = 100;
 
@@ -990,6 +994,90 @@ impl WillContract {
         );
 
         events::will_confirmed(&env, will_id, &owner);
+    }
+
+    /// Triggers an automated clawback/refund for an unconfirmed will (#40).
+    ///
+    /// When a will is created with a confirmation delay, the contract takes
+    /// custody of tokens immediately. If the confirmation deadline passes
+    /// without confirmation or cancellation, the tokens would otherwise remain
+    /// trapped indefinitely in contract custody.
+    ///
+    /// This function is **permissionless** and can be called by anyone once
+    /// `now > confirmation_deadline + 7 days` (the grace margin). It safely
+    /// returns all custodied tokens back to `will.owner`, cleans up storage
+    /// indices, and transitions the will's status to [`WillStatus::Cancelled`].
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if `will_id` does not exist.
+    /// - [`WillError::WillNotConfirmed`] if the will is not in
+    ///   [`WillStatus::PendingConfirmation`] status.
+    /// - [`WillError::ConfirmationWindowExpired`] if the will does not have a
+    ///   confirmation deadline set.
+    /// - [`WillError::ConfirmationWindowNotExpired`] if called before the
+    ///   confirmation deadline plus the 7-day grace margin has elapsed.
+    pub fn refund_unconfirmed_will(env: Env, will_id: u64) {
+        let mut will = load_will(&env, will_id);
+
+        if will.status != WillStatus::PendingConfirmation {
+            panic_with_error!(&env, WillError::WillNotConfirmed);
+        }
+
+        let deadline = match will.confirmation_deadline {
+            Some(d) => d,
+            None => panic_with_error!(&env, WillError::ConfirmationWindowExpired),
+        };
+
+        let now = env.ledger().timestamp();
+        let grace_margin = UNCONFIRMED_WILL_REFUND_GRACE_DAYS * SECONDS_PER_DAY;
+        if now <= deadline.saturating_add(grace_margin) {
+            panic_with_error!(&env, WillError::ConfirmationWindowNotExpired);
+        }
+
+        let owner = will.owner.clone();
+        let contract_address = env.current_contract_address();
+        let token_count = will.balances.len();
+        let balances_snapshot = will.balances.clone();
+        let prior_status = will.status;
+
+        // --- EFFECTS: mutate state and persist before any external calls ---
+        storage::decrement_active_will_count(&env);
+        storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
+        for (token_addr, balance) in balances_snapshot.iter() {
+            if balance > 0 {
+                storage::adjust_locked_value(&env, &token_addr, -balance);
+            }
+        }
+
+        will.balance = 0;
+        will.balances = Map::new(&env);
+        will.status = WillStatus::Cancelled;
+        will.confirmation_deadline = None;
+
+        storage::remove_owner_index(&env, &owner, will_id);
+        for beneficiary in will.beneficiaries.iter() {
+            storage::remove_beneficiary_index(&env, &beneficiary.address, will_id);
+        }
+
+        storage::save_will(&env, &will);
+
+        record_transition(
+            &env,
+            will_id,
+            prior_status,
+            WillStatus::Cancelled,
+            &contract_address,
+            symbol_short!("refund"),
+        );
+
+        // --- INTERACTIONS: external token transfers happen after state is settled ---
+        for (token_addr, balance) in balances_snapshot.iter() {
+            if balance > 0 {
+                token::Client::new(&env, &token_addr).transfer(&contract_address, &owner, &balance);
+            }
+        }
+
+        events::will_cancelled(&env, will_id, &owner, token_count);
     }
 
     // -----------------------------------------------------------------------
@@ -2467,6 +2555,29 @@ impl WillContract {
         } else {
             None
         }
+    }
+
+    /// Returns all active guardian trigger votes and their reason metadata for `will_id` (#38).
+    ///
+    /// Iterates through every guardian configured on the will and collects their
+    /// active, non-expired [`GuardianVoteRecord`].
+    ///
+    /// As documented in [`GuardianVoteReason`] and ADR 0001, reasons are purely
+    /// informational metadata with no on-chain consensus requirement. This query
+    /// enables off-chain indexers and legal executors to audit all cast reasons
+    /// across guardians in a single call and detect conflicting claims.
+    pub fn get_guardian_votes(env: Env, will_id: u64) -> Vec<(Address, GuardianVoteRecord)> {
+        let will = load_will(&env, will_id);
+        let now = env.ledger().timestamp();
+        let mut votes = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if let Some(record) = storage::get_guardian_vote(&env, will_id, &g.address) {
+                if storage::vote_is_live(now, record.timestamp, will.grace_period_days) {
+                    votes.push_back((g.address, record));
+                }
+            }
+        }
+        votes
     }
 
     /// Returns aggregate protocol statistics for all wills currently tracked on-chain.
@@ -4345,6 +4456,21 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &b.address, new_id);
         }
 
+        let child_guardians = reset_guardian_consent(&env, &source.guardians);
+        // Unmodified guardian lists on child wills inherit source cooldown timestamps (#37).
+        // Only set `now` if the guardian list was altered during the split.
+        let guardian_list_unmodified = child_guardians.len() == source.guardians.len()
+            && child_guardians
+                .iter()
+                .zip(source.guardians.iter())
+                .all(|(c, s)| c.address == s.address && c.weight == s.weight);
+
+        let guardian_list_updated_at = if guardian_list_unmodified {
+            source.guardian_list_updated_at
+        } else {
+            now
+        };
+
         let child = Will {
             id: new_id,
             owner: source.owner.clone(),
@@ -4360,13 +4486,13 @@ impl WillContract {
             trigger_time: None,
             confirmation_deadline: None,
             status: WillStatus::Active,
-            guardians: reset_guardian_consent(&env, &source.guardians),
+            guardians: child_guardians,
             guardian_vote_weight: 0,
             guardian_votes: 0,
             guardian_cancel_vote_weight: 0,
             guardian_cancel_votes: 0,
             guardian_threshold: source.guardian_threshold,
-            guardian_list_updated_at: now,
+            guardian_list_updated_at,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: 0,
             delegate: None,
