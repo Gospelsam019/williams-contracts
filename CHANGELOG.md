@@ -58,6 +58,22 @@ gets its own [contract spec artifact](./spec) once exported.
   cannot (#501).
 
 ### Fixed
+- `distribute`'s conservation check (#456) now counts the owner refund and
+  the hashed-beneficiary reserve alongside the keeper bounty and the planned
+  shares. The reserve was withheld from `will.balances` but left out of the
+  sum, so releasing any will with an unclaimed hashed beneficiary aborted
+  with `DistributionMismatch`.
+- Fixed-amount-only wills refund their leftover to the owner instead of
+  absorbing it into the final fixed-amount share, which allocated the same
+  units twice when the refund was also paid (#10). Secondary tokens -- which
+  no fixed amount is denominated in -- had no share at all and aborted the
+  release; their whole balance is now refunded to the owner (#11, #383).
+- `add_hashed_beneficiary` reports a wrong-length commitment as
+  `InvalidCommitmentLength` instead of the generic `InvalidPreimage`; the
+  redundant pre-check that shadowed the correct error was removed (#371).
+- Split the `distribute` doc block off `proportional_share`, whose rustdoc
+  had been describing `distribute` (including the superseded
+  leftover-to-final-beneficiary rule) (#385).
 - `renounce_beneficiary` redistribution now caps the percentage total at
   10,000 bps; the last remaining percentage beneficiary absorbs the rounding
   remainder as a non-negative top-up, using checked arithmetic (#486).
@@ -94,8 +110,8 @@ gets its own [contract spec artifact](./spec) once exported.
 - Grace period is anchored to the missed check-in deadline instead of the time
   `trigger_will` was called; all grace checks share one `grace_deadline`
   helper (#457).
-- Fixed-amount-only wills pay any leftover balance to the final beneficiary
-  instead of stranding it in the contract (#456).
+- Fixed-amount-only wills refund their leftover to the owner instead of
+  stranding it in the contract (#383).
 - `get_wills_by_owner_and_status` filters by status before cutting the page, so
   short pages no longer hide matching wills (#455).
 ### Fixed
