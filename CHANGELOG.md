@@ -58,6 +58,15 @@ gets its own [contract spec artifact](./spec) once exported.
   cannot (#501).
 
 ### Fixed
+- `ProtocolStats::total_locked_by_token` is no longer decremented twice per
+  token on the terminal paths: `cancel_will` called
+  `adjust_locked_for_balances` and then looped over the same snapshot calling
+  `adjust_locked_value` again (#5), and `release_inheritance` decremented
+  every token before `distribute`, whose EFFECTS step already decrements the
+  full balance map -- the guardian-quorum release path reaches that same step
+  with no pre-decrement (#6). The counter had drifted negative on every
+  cancel/release, zero-pruning of fully cancelled tokens never triggered, and
+  `audit_protocol_stats` reported drift after any cancellation.
 - `renounce_beneficiary` redistribution now caps the percentage total at
   10,000 bps; the last remaining percentage beneficiary absorbs the rounding
   remainder as a non-negative top-up, using checked arithmetic (#486).
