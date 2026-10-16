@@ -337,6 +337,13 @@ disambiguate.
 | 48 | `DuplicateWillId` | A `batch_check_in` `will_ids` list named the same will more than once. |
 | 49 | `InvalidConsentTransition` | `accept_guardian_role` was called by a guardian who had already `Rejected` the role, which is terminal. |
 | 50 | `NoFailedPayout` | `retry_failed_payout` was called for a `(will_id, token, recipient)` tuple with no recorded failed payout. |
+| 51 | `UnsupportedSchemaVersion` | A stored will could not be decoded as the current `Will` layout or any known legacy layout. |
+| 52 | `PrimaryTokenMismatch` | Cannot merge: the two wills' primary tokens differ. |
+| 53 | `GuardianCancelInProgress` | A guardian-list update was attempted while guardian-cancel votes were still recorded against the current list (#488). |
+| 54 | `ConfirmationWindowNotExpired` | `refund_unconfirmed_will` was called before the confirmation deadline plus grace margin had elapsed (#40). |
+| 55 | `ArithmeticOverflow` | A timestamp or deadline calculation overflowed `u64`; checked helpers panic with this error rather than wrapping silently (#16). |
+| 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold (#109). |
+| 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner (#19). |
 
 ## Contract spec artifact
 

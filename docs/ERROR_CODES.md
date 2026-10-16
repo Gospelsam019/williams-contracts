@@ -63,6 +63,10 @@ available discriminant; existing values are never changed.
 | 51 | `UnsupportedSchemaVersion` | A stored will could not be decoded as the current `Will` layout or any known legacy layout. |
 | 52 | `PrimaryTokenMismatch` | Cannot merge: the two wills' primary tokens differ. |
 | 53 | `GuardianCancelInProgress` | A guardian-list update was attempted while guardian-cancel votes were still recorded. |
+| 54 | `ConfirmationWindowNotExpired` | `refund_unconfirmed_will` was called before the confirmation deadline plus grace margin had elapsed. |
+| 55 | `ArithmeticOverflow` | A timestamp or deadline calculation overflowed `u64`; checked helpers panic with this error rather than wrapping silently. |
+| 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold. |
+| 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner. |
 
 ## Notes
 
