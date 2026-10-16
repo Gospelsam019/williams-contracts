@@ -535,3 +535,61 @@ fn assert_rent_renewal(active_ttl: u32, terminal_ttl: u32) {
          still active ({active_ttl} ledgers); terminal wills should stop paying rent"
     );
 }
+
+/// Profiles the write-byte cost of `check_in` at different beneficiary/guardian
+/// list sizes, producing the baseline figures for the hot/cold struct-split
+/// analysis described in docs/RESOURCE_COSTS.md (issue #43).
+///
+/// `check_in` reads and writes the full `Will` struct even though it only
+/// updates `last_checkin`. The write-byte count therefore grows with the size
+/// of the beneficiary and guardian lists — fields the call never modifies.
+/// Splitting the struct into "hot" mutable fields (`last_checkin`, `status`,
+/// `trigger_time`, `guardian_votes`, `balance`) and "cold" immutable ones
+/// (beneficiaries, guardians, settings) would reduce the `check_in` write path
+/// to the size of the hot half alone, roughly a 5× reduction at the
+/// `PROFILE_BENEFICIARIES` count.
+///
+/// This scenario measures the *current* write bytes at 1, 5 (the standard
+/// profile size), and 10 beneficiaries so the gain from a future hot/cold
+/// migration can be quantified against these baselines. The numbers also
+/// validate the claim in RESOURCE_COSTS.md that check_in write bytes scale
+/// with beneficiary count: if `check_in_5b_write_bytes` is not larger than
+/// `check_in_1b_write_bytes`, the struct is already being partially skipped
+/// and the doc claim needs revisiting.
+///
+/// Run with `cargo test -p will --lib profile_check_in_hot_cold_baseline -- --nocapture`
+#[test]
+fn profile_check_in_hot_cold_baseline() {
+    extern crate std;
+    use std::println;
+
+    let counts = [1u32, 5, 10];
+    println!("\ncheck_in write-byte cost vs beneficiary count (hot/cold split baseline)\n");
+    println!("| beneficiaries | write bytes | write entries |");
+    println!("| ---: | ---: | ---: |");
+
+    for &count in &counts {
+        let f = fixture();
+        let list = beneficiaries(&f.env, count);
+        let tokens: soroban_sdk::Vec<(Address, i128)> =
+            soroban_sdk::vec![&f.env, (f.token.clone(), 1_000_000_i128)];
+        let will_id = f.client.create_will(
+            &f.owner,
+            &tokens,
+            &list,
+            &90,
+            &7,
+            &soroban_sdk::vec![&f.env],
+            &0,
+            &None,
+            &0,
+        );
+        f.client.check_in(&will_id, &f.owner);
+        let resources = f.env.cost_estimate().resources();
+        println!(
+            "| {count} | {} | {} |",
+            resources.write_bytes, resources.write_entries
+        );
+    }
+    println!();
+}

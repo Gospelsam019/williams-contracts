@@ -456,6 +456,27 @@ pub fn index_by_owner(env: &Env, owner: &Address, will_id: u64) {
     index_push(env, DataKey::OwnerWills(owner.clone()), will_id);
 }
 
+/// Extends the TTL of the `OwnerWills` index for `owner` without modifying
+/// its content, if the entry is present.
+///
+/// Called by `check_in` and `trigger_will` so that an owner who holds wills
+/// for longer than `BUMP_AMOUNT` ledgers without creating or removing any
+/// will never finds their `OwnerWills` entry silently expired. Without this
+/// refresh, `index_push` in a subsequent `create_will` would see a missing
+/// key, initialise a fresh `Vec::new(env)`, and strand all previously
+/// indexed will ids in an unreachable state (issue #41).
+///
+/// The TTL bump is applied only when the entry already exists: a missing entry
+/// means the owner has no indexed wills, so there is nothing to protect.
+pub fn refresh_owner_index_ttl(env: &Env, owner: &Address) {
+    let key = DataKey::OwnerWills(owner.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+}
+
 /// Adds `will_id` to the index of wills `beneficiary` is named in, if not already present.
 pub fn index_by_beneficiary(env: &Env, beneficiary: &Address, will_id: u64) {
     index_push(env, DataKey::BeneficiaryWills(beneficiary.clone()), will_id);
@@ -523,12 +544,19 @@ pub fn remove_owner_index(env: &Env, owner: &Address, will_id: u64) {
 }
 
 /// Returns the list of will ids owned by `owner`.
+///
+/// Also refreshes the TTL of the `OwnerWills` entry when it exists, so that a
+/// read-only query from the owner's dashboard counts as activity for the
+/// purpose of keeping the index alive (issue #41).
 pub fn get_owner_wills(env: &Env, owner: &Address) -> Vec<u64> {
     let key = DataKey::OwnerWills(owner.clone());
-    env.storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or_else(|| Vec::new(env))
+    let ids: Option<Vec<u64>> = env.storage().persistent().get(&key);
+    if ids.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+    ids.unwrap_or_else(|| Vec::new(env))
 }
 
 /// Returns the list of will ids `beneficiary` is named in.
