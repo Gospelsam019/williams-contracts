@@ -225,4 +225,14 @@ pub enum WillError {
     /// would wipe those votes and let a fresh trigger bypass a cancel that was
     /// accumulating against it, so the update is refused (#488).
     GuardianCancelInProgress = 53,
+    /// A timestamp or deadline calculation overflowed `u64`.
+    ///
+    /// `checkin_period_days` and `grace_period_days` are individually bounded
+    /// by `MAX_PERIOD_DAYS` when they are set, but the combination
+    /// `last_checkin + checkin_period_days * SECONDS_PER_DAY` or the
+    /// subsequent `+ grace_period_days * SECONDS_PER_DAY` could still
+    /// overflow in extreme fuzz or adversarial scenarios. All deadline and
+    /// period arithmetic goes through checked helpers that panic with this
+    /// error rather than wrapping silently (#16).
+    ArithmeticOverflow = 54,
 }

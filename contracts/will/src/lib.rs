@@ -825,6 +825,7 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &beneficiaries,
+            &Vec::new(&env),
             primary_token_balance(&balances, &primary_token),
         );
 
@@ -910,7 +911,7 @@ impl WillContract {
             &owner,
             token_count,
             &will.beneficiaries,
-            now + checkin_period_days * SECONDS_PER_DAY,
+            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, checkin_period_days)),
         );
 
         will_id
@@ -970,7 +971,7 @@ impl WillContract {
         if will.beneficiaries.is_empty() || will.beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
-        assert_valid_allocations(&env, &will.beneficiaries, total_balance(&will.balances));
+        assert_valid_allocations(&env, &will.beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
         assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
         will.status = WillStatus::Active;
@@ -1024,7 +1025,7 @@ impl WillContract {
 
         let now = env.ledger().timestamp();
         will.last_checkin = now;
-        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
         storage::save_will(&env, &will);
 
         // Refresh the owner index TTL on every check-in so that an account
@@ -1101,7 +1102,7 @@ impl WillContract {
             assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
             will.last_checkin = now;
-            let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+            let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
             storage::save_will(&env, &will);
 
             // Same per-will audit entry as the single-will `check_in` path,
@@ -1154,7 +1155,7 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         let now = env.ledger().timestamp();
-        let deadline = will.last_checkin + will.checkin_period_days * SECONDS_PER_DAY;
+        let deadline = checked_add_timestamp(&env, will.last_checkin, checked_days_to_seconds(&env, will.checkin_period_days));
         if now < deadline {
             panic_with_error!(&env, WillError::CheckinNotDue);
         }
@@ -1165,7 +1166,7 @@ impl WillContract {
         // delayed trigger can neither postpone nor accelerate the release.
         will.status = WillStatus::Triggered;
         will.trigger_time = Some(deadline);
-        let grace_period_ends = grace_deadline(&will);
+        let grace_period_ends = grace_deadline(&env, &will);
         storage::save_will(&env, &will);
 
         // Refresh the owner index TTL so that an owner account that has gone
@@ -1191,17 +1192,17 @@ impl WillContract {
     /// Cancels an in-progress trigger during the grace period, proving the
     /// owner is alive, and resets the check-in countdown.
     ///
-    /// The grace deadline second belongs to the owner: this call is valid while
-    /// `now <= trigger_time + grace_period_days * SECONDS_PER_DAY` and panics
-    /// with [`WillError::GracePeriodExpired`] strictly after it. The rule in
+    /// The grace deadline second belongs to release: this call is valid while
+    /// `now < trigger_time + grace_period_days * SECONDS_PER_DAY` and panics
+    /// with [`WillError::GracePeriodExpired`] at or after it. The rule in
     /// [`Self::release_inheritance`] is the exact complement of this one, so
-    /// precisely one of the two succeeds at every timestamp (#354).
+    /// precisely one of the two succeeds at every timestamp (#14, #354).
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodExpired`] if the grace period has already
-    ///   elapsed, i.e. `now` is strictly greater than the grace deadline.
+    ///   elapsed, i.e. `now` is at or after the grace deadline.
     pub fn emergency_checkin(env: Env, will_id: u64, owner: Address) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
@@ -1222,7 +1223,7 @@ impl WillContract {
         // `assert_status(.., Triggered, ..)` above doesn't already guarantee
         // (a `Triggered` will always has `trigger_time` set).
         let now = env.ledger().timestamp();
-        if now > grace_deadline(&will) {
+        if now >= grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
@@ -1251,7 +1252,7 @@ impl WillContract {
             symbol_short!("emerg"),
         );
 
-        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
     }
 
@@ -1259,14 +1260,13 @@ impl WillContract {
     /// their configured percentages. Callable by anyone once the grace
     /// period has fully elapsed.
     ///
-    /// The grace deadline second itself is **not** releasable: this call
-    /// requires `now` to be strictly greater than
-    /// `trigger_time + grace_period_days * SECONDS_PER_DAY` and panics with
-    /// [`WillError::GracePeriodNotExpired`] at or before it. The boundary second
-    /// therefore belongs to the owner's [`Self::emergency_checkin`], which
-    /// accepts `now <= deadline`. Exactly one of the two succeeds at any
-    /// timestamp, so the outcome no longer depends on which transaction the
-    /// ledger happens to order first (#354).
+    /// The grace deadline second itself is **releasable**: this call
+    /// requires `now >= trigger_time + grace_period_days * SECONDS_PER_DAY`
+    /// and panics with [`WillError::GracePeriodNotExpired`] before it.
+    /// The boundary second therefore belongs to `release_inheritance`;
+    /// [`Self::emergency_checkin`] accepts `now < deadline`, so exactly one
+    /// of the two succeeds at any timestamp and the outcome no longer depends
+    /// on which transaction the ledger happens to order first (#14, #354).
     ///
     /// Tokens are transferred directly to each beneficiary ("push" mode);
     /// there is no pull mode and no `claim_share` entry point. Whatever the
@@ -1308,8 +1308,8 @@ impl WillContract {
     ///   `env.ledger().timestamp() < trigger_time + grace_period_days` — the
     ///   grace period deadline has not passed yet.
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
-    /// - [`WillError::GracePeriodNotExpired`] if `now` is at or before the grace
-    ///   deadline, i.e. the grace period has not strictly elapsed yet.
+    /// - [`WillError::GracePeriodNotExpired`] if `now` is strictly before the grace
+    ///   deadline, i.e. the grace period has not yet elapsed.
     ///
     /// # Examples
     ///
@@ -1334,14 +1334,13 @@ impl WillContract {
             WillError::WillNotTriggered,
         );
 
-        // Timing invariant (#442): funds may only leave via this path once
-        // the grace period has fully elapsed, i.e. `now >= grace_period_end`.
-        // Strictly greater than is rejected: the boundary second belongs to
-        // the owner's `emergency_checkin`, so exactly one of these two entry
-        // points is valid at any timestamp and the outcome cannot depend on
-        // transaction order within a ledger (#354). `emergency_checkin` and
-        // `guardian_cancel_trigger` enforce the same deadline from the other
-        // side, so all three agree on when the grace period is over.
+        // Timing invariant (#14, #442): funds may only leave via this path once
+        // the grace period has elapsed, i.e. `now >= grace_deadline`.
+        // The grace deadline second belongs to release_inheritance: at
+        // `now == grace_deadline`, `release_inheritance` succeeds and
+        // `emergency_checkin` / `guardian_cancel_trigger` fail, so exactly one
+        // of the two is valid at any timestamp and the outcome cannot depend on
+        // transaction order within a ledger (#354).
         //
         // #751 — this used to also bind its own local `grace_deadline` via
         // `grace_period_end(&env, &will)` and re-check `now <= grace_deadline`
@@ -1352,7 +1351,7 @@ impl WillContract {
         // call below) conditional on the grace period *not yet* having
         // expired, the exact opposite of this function's purpose.
         let now = env.ledger().timestamp();
-        if now < grace_deadline(&will) {
+        if now < grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -1550,13 +1549,14 @@ impl WillContract {
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         assert_beneficiary_count(&env, &beneficiaries);
-        assert_valid_allocations(&env, &beneficiaries, total_balance(&will.balances));
+        assert_valid_allocations(&env, &beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
         assert_valid_allocations(
             &env,
             &beneficiaries,
+            &will.hashed_beneficiaries,
             primary_token_balance(&will.balances, &will.token),
         );
 
@@ -1843,6 +1843,7 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &will.beneficiaries,
+            &will.hashed_beneficiaries,
             primary_token_balance(&will.balances, &will.token),
         );
 
@@ -2047,13 +2048,12 @@ impl WillContract {
     ///   [`MAX_PERIOD_DAYS`].
     ///
     /// # Events
-    /// Emits [`events::periods_updated`] whose `next_deadline` field is the
-    /// deadline [`Self::trigger_will`] actually enforces, namely
-    /// `last_checkin + checkin_period_days * SECONDS_PER_DAY`. This function
-    /// never touches `last_checkin`, so that value is independent of when the
-    /// owner happens to call: an indexer that schedules reminders from the event
-    /// stays in sync with the on-chain rule instead of drifting later by however
-    /// long it has been since the last check-in (#357).
+    /// Emits [`events::periods_updated`] whose `next_deadline` field is
+    /// `now + checkin_period_days * SECONDS_PER_DAY`, where `now` is the
+    /// timestamp at which this call executes. Because the owner must sign this
+    /// transaction, `update_periods` resets `last_checkin` to `now` so that
+    /// reducing the period can never retroactively expire the will and make it
+    /// immediately triggerable by a keeper (#15).
     pub fn update_periods(
         env: Env,
         will_id: u64,
@@ -2064,6 +2064,8 @@ impl WillContract {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        let now = env.ledger().timestamp();
 
         // Update checkin period if provided
         if let Some(new_checkin) = checkin_period_days {
@@ -2083,11 +2085,11 @@ impl WillContract {
             will.grace_period_days = new_grace;
         }
 
-        // `trigger_will` derives the deadline from `last_checkin`, which this call
-        // leaves untouched, so the event must carry that same value rather than
-        // `now + period` — otherwise the published deadline is later than the
-        // enforced one by the age of the current check-in (#357).
-        let next_deadline = will.last_checkin + will.checkin_period_days * SECONDS_PER_DAY;
+        // Reset last_checkin to now so the new periods apply from this moment,
+        // preventing retroactive expiration if the owner reduces the period below
+        // the already elapsed time (#15).
+        will.last_checkin = now;
+        let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2155,13 +2157,14 @@ impl WillContract {
         // Update beneficiaries if provided
         if let Some(new_beneficiaries) = beneficiaries {
             assert_beneficiary_count(&env, &new_beneficiaries);
-            assert_valid_allocations(&env, &new_beneficiaries, total_balance(&will.balances));
+            assert_valid_allocations(&env, &new_beneficiaries, &will.hashed_beneficiaries, total_balance(&will.balances));
             if new_beneficiaries.is_empty() || new_beneficiaries.len() > MAX_BENEFICIARIES {
                 panic_with_error!(&env, WillError::TooManyBeneficiaries);
             }
             assert_valid_allocations(
                 &env,
                 &new_beneficiaries,
+                &will.hashed_beneficiaries,
                 primary_token_balance(&will.balances, &will.token),
             );
 
@@ -2415,8 +2418,7 @@ impl WillContract {
 
         match will.status {
             WillStatus::Active => {
-                let deadline =
-                    will.last_checkin as i64 + (will.checkin_period_days * SECONDS_PER_DAY) as i64;
+                let deadline = checked_deadline_as_i64(&env, will.last_checkin, will.checkin_period_days);
                 Some(deadline - now)
             }
             WillStatus::Triggered => {
@@ -2427,8 +2429,8 @@ impl WillContract {
                 // future entry point ever saves a `Triggered` will without it,
                 // in which case it deliberately degrades to `last_checkin`
                 // (understating the elapsed grace period) rather than panicking.
-                let trigger_time = will.trigger_time.unwrap_or(will.last_checkin) as i64;
-                let deadline = trigger_time + (will.grace_period_days * SECONDS_PER_DAY) as i64;
+                let trigger_time = will.trigger_time.unwrap_or(will.last_checkin);
+                let deadline = checked_deadline_as_i64(&env, trigger_time, will.grace_period_days);
                 Some(deadline - now)
             }
             WillStatus::PendingConfirmation
@@ -2909,8 +2911,8 @@ impl WillContract {
 
         // Enforce guardian-list cooldown.
         let now = env.ledger().timestamp();
-        let cooldown_seconds = GUARDIAN_COOLDOWN_DAYS * SECONDS_PER_DAY;
-        let cooldown_ends = will.guardian_list_updated_at + cooldown_seconds;
+        let cooldown_seconds = checked_days_to_seconds(&env, GUARDIAN_COOLDOWN_DAYS);
+        let cooldown_ends = checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
         if now < cooldown_ends {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
@@ -3033,14 +3035,14 @@ impl WillContract {
         // restart the check-in clock (#373) -- same rule `emergency_checkin`
         // enforces, so a guardian quorum and the owner are held to one deadline.
         let trigger_time = will.trigger_time.unwrap_or(0);
-        let grace_deadline = trigger_time + will.grace_period_days * SECONDS_PER_DAY;
-        if now > grace_deadline {
+        let grace_deadline = checked_add_timestamp(&env, trigger_time, checked_days_to_seconds(&env, will.grace_period_days));
+        if now >= grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
         // Enforce guardian-list cooldown (same rule as guardian_trigger).
-        let cooldown_seconds = GUARDIAN_COOLDOWN_DAYS * SECONDS_PER_DAY;
-        let cooldown_ends = will.guardian_list_updated_at + cooldown_seconds;
+        let cooldown_seconds = checked_days_to_seconds(&env, GUARDIAN_COOLDOWN_DAYS);
+        let cooldown_ends = checked_add_timestamp(&env, will.guardian_list_updated_at, cooldown_seconds);
         if now < cooldown_ends {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
@@ -3116,7 +3118,7 @@ impl WillContract {
                 symbol_short!("gcancel"),
             );
 
-            let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+            let next_deadline = checked_add_timestamp(&env, now, checked_days_to_seconds(&env, will.checkin_period_days));
             events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
         }
     }
@@ -3380,6 +3382,7 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &source.beneficiaries,
+            &cloned_hashed,
             primary_token_balance(&balances, &primary_token),
         );
 
@@ -3455,7 +3458,7 @@ impl WillContract {
             &owner,
             token_count,
             &will.beneficiaries,
-            now + source.checkin_period_days * SECONDS_PER_DAY,
+            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, source.checkin_period_days)),
         );
         events::will_cloned(&env, source_will_id, will_id, &owner);
 
@@ -3573,6 +3576,7 @@ impl WillContract {
             assert_valid_allocations(
                 &env,
                 &beneficiaries,
+                &Vec::new(&env),
                 primary_token_balance(&balances, &primary_token),
             );
 
@@ -3642,7 +3646,7 @@ impl WillContract {
                 &owner,
                 token_count,
                 &will.beneficiaries,
-                now + checkin_period_days * SECONDS_PER_DAY,
+                checked_add_timestamp(&env, now, checked_days_to_seconds(&env, checkin_period_days)),
             );
 
             ids.push_back(will_id);
@@ -4320,11 +4324,13 @@ impl WillContract {
         assert_valid_allocations(
             &env,
             &normalised_remaining,
+            &source.hashed_beneficiaries,
             primary_token_balance(&source.balances, &source.token),
         );
         assert_valid_allocations(
             &env,
             &normalised_split,
+            &Vec::new(&env),
             primary_token_balance(&child_balances, &primary_token),
         );
 
@@ -4398,7 +4404,7 @@ impl WillContract {
             &owner,
             child_token_count,
             &normalised_split,
-            now + source.checkin_period_days * SECONDS_PER_DAY,
+            checked_add_timestamp(&env, now, checked_days_to_seconds(&env, source.checkin_period_days)),
         );
 
         new_id
@@ -4598,7 +4604,7 @@ impl WillContract {
             WillError::WillNotReleased,
         );
 
-        if env.ledger().timestamp() < grace_deadline(&will) {
+        if env.ledger().timestamp() < grace_deadline(&env, &will) {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -4892,7 +4898,15 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
 ///   beneficiaries at all) is allowed to account for less than the whole
 ///   balance; the unallocated remainder is refunded to the owner at
 ///   distribute time rather than left stranded in the contract (#383).
-fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, primary_balance: i128) {
+/// - When `hashed_beneficiaries` is provided, their committed percentages are
+///   included in the total percentage check so that visible + hashed never
+///   exceed 10,000 basis points (#13).
+fn assert_valid_allocations(
+    env: &Env,
+    beneficiaries: &Vec<Beneficiary>,
+    hashed_beneficiaries: &Vec<HashedBeneficiary>,
+    primary_balance: i128,
+) {
     let mut percentage_total: u32 = 0;
     let mut fixed_total: i128 = 0;
     let mut has_percentage = false;
@@ -4922,6 +4936,12 @@ fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, primary
     if fixed_total > primary_balance {
         panic_with_error!(env, WillError::FixedAmountExceedsBalance);
     }
+
+    // Include hashed beneficiary percentages in the total (#13).
+    for hb in hashed_beneficiaries.iter() {
+        total_checked_add(&mut percentage_total, hb.percentage, env);
+    }
+
     if has_percentage && percentage_total != 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
     }
@@ -5275,6 +5295,38 @@ fn wills_by_owner_and_status_page(
     }
 }
 
+/// Computes `days * SECONDS_PER_DAY` with overflow detection (#16).
+///
+/// Panics with [`WillError::ArithmeticOverflow`] if the multiplication would
+/// overflow `u64`. `days` is bounded by `MAX_PERIOD_DAYS` when set, but the
+/// check here is defense in depth for fuzz and edge cases.
+fn checked_days_to_seconds(env: &Env, days: u64) -> u64 {
+    days.checked_mul(SECONDS_PER_DAY)
+        .unwrap_or_else(|| panic_with_error!(env, WillError::ArithmeticOverflow))
+}
+
+/// Computes `base + offset` with overflow detection (#16).
+///
+/// Panics with [`WillError::ArithmeticOverflow`] if the addition would
+/// overflow `u64`. Used for all deadline calculations where `base` is a
+/// ledger timestamp and `offset` is a period converted to seconds.
+fn checked_add_timestamp(env: &Env, base: u64, offset: u64) -> u64 {
+    base.checked_add(offset)
+        .unwrap_or_else(|| panic_with_error!(env, WillError::ArithmeticOverflow))
+}
+
+/// Computes a deadline as `i64` for time-until calculations (#16).
+///
+/// Used by `get_time_until_deadline` which returns signed seconds to allow
+/// negative values (past-due deadlines). Panics with
+/// [`WillError::ArithmeticOverflow`] if the computation overflows.
+fn checked_deadline_as_i64(env: &Env, base: u64, days: u64) -> i64 {
+    let offset = checked_days_to_seconds(env, days);
+    let deadline_u64 = checked_add_timestamp(env, base, offset);
+    deadline_u64.try_into()
+        .unwrap_or_else(|_| panic_with_error!(env, WillError::ArithmeticOverflow))
+}
+
 /// Returns the Unix timestamp at which `will`'s grace period ends.
 ///
 /// The grace period starts at the missed check-in deadline
@@ -5284,11 +5336,13 @@ fn wills_by_owner_and_status_page(
 /// goes through this helper so they can never disagree. The fallback for a
 /// missing `trigger_time` uses the same anchor rather than `0`, which would
 /// otherwise make the grace period appear long expired.
-fn grace_deadline(will: &Will) -> u64 {
-    let start = will
-        .trigger_time
-        .unwrap_or(will.last_checkin + will.checkin_period_days * SECONDS_PER_DAY);
-    start + will.grace_period_days * SECONDS_PER_DAY
+fn grace_deadline(env: &Env, will: &Will) -> u64 {
+    let start = will.trigger_time.unwrap_or_else(|| {
+        let period_seconds = checked_days_to_seconds(env, will.checkin_period_days);
+        checked_add_timestamp(env, will.last_checkin, period_seconds)
+    });
+    let grace_seconds = checked_days_to_seconds(env, will.grace_period_days);
+    checked_add_timestamp(env, start, grace_seconds)
 }
 
 /// Counts the live votes on `will` and returns `(vote_count, vote_weight)`.
