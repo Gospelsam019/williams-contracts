@@ -1367,10 +1367,36 @@ impl WillContract {
 
     /// Sets or replaces the delegate address for `will_id`. Only callable
     /// by the owner while the will is `Active`. Pass `None` to clear.
+    ///
+    /// # Delegate eligibility (#31)
+    ///
+    /// - The delegate cannot be the will's `owner` (self-delegation is
+    ///   redundant and emits misleading `delegate_set` audit events).
+    /// - The delegate cannot be the contract's own address
+    ///   (`env.current_contract_address()`), which cannot sign `check_in`
+    ///   invocations.
+    /// - Guardians and beneficiaries are permitted to serve as delegates when
+    ///   the owner chooses to entrust them with routine `check_in` maintenance,
+    ///   as a delegate's authority is strictly limited to resetting the
+    ///   check-in countdown and confers no withdrawal, cancellation, or
+    ///   early-release power.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotOwner`] if `owner` does not own the will.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::InvalidDelegate`] if `delegate` is `Some(addr)` where
+    ///   `addr == owner` or `addr == env.current_contract_address()`.
     pub fn set_delegate(env: Env, will_id: u64, owner: Address, delegate: Option<Address>) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if let Some(ref addr) = delegate {
+            if addr == &owner || addr == &env.current_contract_address() {
+                panic_with_error!(&env, WillError::InvalidDelegate);
+            }
+        }
 
         will.delegate = delegate.clone();
         storage::save_will(&env, &will);
@@ -6217,21 +6243,31 @@ fn collect_proportional_bounties(plan: &mut Map<Address, i128>, will: &Will) {
 ///    each token by basis point. The last percentage beneficiary absorbs the
 ///    integer-division remainder, so no dust is left behind (#190).
 ///
-/// # Rounding
+/// # Rounding and dust remainder semantics (#32)
 ///
-/// Each token's distribution is calculated as
-/// `share = balance * (basis_points / 10_000)`. Integer division truncates
-/// toward zero, which may result in zero shares for beneficiaries with very
-/// small calculated amounts: distributing 9 units equally among 10
-/// beneficiaries (900 bp each) gives each 0.9 units, which truncates to 0.
-/// The remainder is paid to the final percentage beneficiary, which
-/// guarantees the full balance of every token is always distributed.
+/// Each token's proportional share for the first `N - 1` percentage
+/// beneficiaries is calculated via [`proportional_share`] as
+/// `floor(remaining * basis_points / 10_000)`. Integer division truncates
+/// toward zero, leaving a rounding remainder of at most `N - 1` stroops per
+/// token.
+///
+/// The final `Allocation::Percentage` beneficiary in `will.beneficiaries`
+/// deterministically receives `percentage_remaining` (their proportional share
+/// plus any sub-stroop truncation dust) for every token held by the will. This
+/// deterministic convention avoids per-token hashing or sorting overhead at
+/// release time while strictly guaranteeing 100% balance conservation with
+/// zero dust stranded in the contract. Because the final percentage
+/// beneficiary absorbs the rounding surplus across all tokens, client UIs and
+/// SDK callers that care about dust ordering on tiny or low-decimal balances
+/// should treat the final percentage slot as the remainder recipient.
 ///
 /// **Note:** Callers should ensure that the will's balance is sufficient to
 /// give each beneficiary at least 1 unit of their share. Extremely small
-/// balances relative to beneficiary counts can result in most recipients
-/// getting zero after rounding. Consider validating a minimum will amount at
-/// creation time (see issue #37).
+/// balances relative to beneficiary counts (e.g. distributing 9 units equally
+/// among 10 beneficiaries at 900 bp each, where `floor(0.9) == 0`) can result
+/// in earlier recipients getting zero after truncation while the final
+/// percentage beneficiary receives the remainder. Consider validating a
+/// minimum will amount at creation time (see issue #37).
 ///
 /// # Leftover value
 ///
