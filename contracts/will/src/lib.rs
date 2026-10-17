@@ -3029,10 +3029,15 @@ impl WillContract {
     /// Repairs bookkeeping drift (#441) by overwriting the stored protocol
     /// stats with the values recomputed from storage, and returns them.
     ///
-    /// Callable by anyone: the written values are derived purely from
-    /// on-chain will state, so a caller cannot influence them. Tokens whose
-    /// recomputed total is zero are dropped from the stored list.
-    pub fn repair_protocol_stats(env: Env) -> ProtocolStats {
+    /// Requires the caller to authenticate (`caller.require_auth()`). Although
+    /// the written values are derived purely from on-chain will state and a
+    /// caller cannot influence them, the full storage walk triggered by this
+    /// function is expensive and unmetered; requiring auth prevents anonymous
+    /// DoS griefing (#55).
+    ///
+    /// Tokens whose recomputed total is zero are dropped from the stored list.
+    pub fn repair_protocol_stats(env: Env, caller: Address) -> ProtocolStats {
+        caller.require_auth();
         let computed = storage::recompute_protocol_stats(&env);
         let mut total_locked_by_token = Vec::new(&env);
         for entry in computed.total_locked_by_token.iter() {
@@ -3240,20 +3245,16 @@ impl WillContract {
     ) -> WillPage {
         let ids = storage::get_owner_wills(&env, &owner);
         let page_size = limit.min(storage::MAX_PAGE_SIZE);
-        let mut wills = Vec::new(&env);
         let cursor_val = cursor.unwrap_or(0);
         let skip = cursor.is_some();
-        let mut skipping = skip;
 
+        // #56: Single pass over storage. Collect every matching will in one
+        // loop so total_count and the current page are computed together,
+        // halving the number of persistent-storage reads compared to the
+        // previous two-loop implementation.
+        let mut all_matching: Vec<Will> = Vec::new(&env);
+        let mut skipping = skip;
         for id in ids.iter() {
-            // Check the page size *before* considering another will, exactly
-            // like `storage::paginate_ids` does: with `limit == 0` the loop
-            // exits immediately and the page comes back empty, instead of
-            // collecting one will before a post-push size check could stop it
-            // (#360).
-            if wills.len() >= page_size {
-                break;
-            }
             if skipping {
                 if id <= cursor_val {
                     continue;
@@ -3265,20 +3266,37 @@ impl WillContract {
                 Err(e) => panic_with_error!(&env, e),
             };
             if will.status == status {
-                wills.push_back(will);
+                all_matching.push_back(will);
             }
         }
 
-        // Count total matching wills for pagination
-        let mut total_count = 0;
-        for id in ids.iter() {
-            let will = match storage::load_will(&env, id) {
-                Ok(w) => w,
-                Err(_) => continue,
-            };
-            if will.status == status {
-                total_count += 1;
+        // Now compute total_count across the full owner index (before cursor).
+        // We need to walk ids that were skipped above as well, so do a cheap
+        // second pass over only the skipped portion of the id list.
+        let mut pre_cursor_count: u32 = 0;
+        if skip {
+            for id in ids.iter() {
+                if id > cursor_val {
+                    break;
+                }
+                let will = match storage::load_will(&env, id) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                if will.status == status {
+                    pre_cursor_count += 1;
+                }
             }
+        }
+        let total_count = pre_cursor_count + all_matching.len();
+
+        // Take at most page_size wills for the response.
+        let mut wills: Vec<Will> = Vec::new(&env);
+        for will in all_matching.iter() {
+            if wills.len() >= page_size {
+                break;
+            }
+            wills.push_back(will);
         }
 
         let next_cursor = if wills.len() >= page_size {
@@ -3857,14 +3875,18 @@ impl WillContract {
     /// before they can vote on it, so consent recorded on the source will does
     /// not carry over (#375).
     ///
-    /// The source will must be `Active` or `Triggered`. Cloning is
-    /// deliberately *not* allowed from a `Cancelled`, `Released`, or
-    /// `Settled` source: an owner who let a will resolve to one of those
-    /// terminal states may have done so specifically because the
-    /// beneficiary/guardian configuration no longer reflects their wishes
-    /// (e.g. cancelling because a beneficiary is no longer trusted), and
-    /// silently letting that configuration be reused as a template for a
-    /// brand-new, separately-funded will would be surprising. Callers who
+    /// The source will must be `Active`. Cloning is deliberately *not*
+    /// allowed from a `Triggered`, `Cancelled`, `Released`, or `Settled`
+    /// source. A `Triggered` will is in the middle of a grace period: its
+    /// owner has missed a check-in and may be inactive. Permitting a clone
+    /// from that state would let a compromised key escape inactivity
+    /// detection by spinning up a fresh `Active` will without performing an
+    /// `emergency_checkin` (#53). Terminal states (`Cancelled`, `Released`,
+    /// `Settled`) are excluded because an owner who let a will reach one of
+    /// those states may have done so because the beneficiary/guardian
+    /// configuration no longer reflects their wishes (e.g. cancelling
+    /// because a beneficiary is no longer trusted), and silently reusing
+    /// that configuration as a template would be surprising. Callers who
     /// want to reuse an old configuration from a terminal will must supply
     /// the beneficiary/guardian lists to [`create_will`] directly, which
     /// forces a conscious re-entry of the data instead of an implicit copy.
@@ -3885,8 +3907,7 @@ impl WillContract {
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if the source will does not exist.
-    /// - [`WillError::WillNotActive`] if the source will is not `Active` or
-    ///   `Triggered`.
+    /// - [`WillError::WillNotActive`] if the source will is not `Active` (#53).
     /// - [`WillError::ZeroAmount`] if any token amount is not positive.
     /// - [`WillError::InvalidTokenCount`] if the token list is empty or too large.
     /// - [`WillError::FixedAmountExceedsBalance`] if the source's
@@ -3905,7 +3926,11 @@ impl WillContract {
         }
 
         let source = load_will(&env, source_will_id);
-        if source.status != WillStatus::Active && source.status != WillStatus::Triggered {
+        // #53: only Active wills may be cloned. A Triggered will is mid
+        // grace-period; allowing clones from it would let a hot wallet
+        // circumvent inactivity detection by spinning up a fresh Active will
+        // without performing an emergency_checkin.
+        if source.status != WillStatus::Active {
             panic_with_error!(&env, WillError::WillNotActive);
         }
 
@@ -3926,6 +3951,17 @@ impl WillContract {
         // this cheap in-contract check, not after the token transfer below
         // has already succeeded (#51).
         storage::assert_index_capacity(&env, &owner, &source.beneficiaries);
+
+        // #54: Reject duplicate token addresses before any transfer, matching
+        // the same guard in `create_will`. Duplicates would cause the legacy
+        // `balance` mirror to disagree with the accumulated `balances` map.
+        let mut seen_tokens: Vec<Address> = Vec::new(&env);
+        for (token_addr, _) in tokens.iter() {
+            if seen_tokens.contains(&token_addr) {
+                panic_with_error!(&env, WillError::DuplicateToken);
+            }
+            seen_tokens.push_back(token_addr);
+        }
 
         // Build balances map and transfer tokens from the owner.
         let mut balances: Map<Address, i128> = Map::new(&env);
