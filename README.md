@@ -425,3 +425,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-69 -->
 - #69: Guardian Threshold Can Exceed Total Cumulative Guardian Weights in Weighted Configurations
+
+<!-- handsoff-issue-70 -->
+- #70: reject_guardian_role Does Not Purge Cast Votes from Storage Namespace
