@@ -162,48 +162,59 @@ Will IDs are sequential starting from 1. An attacker could enumerate all wills b
 
 **Recommendation:** Consider adding pagination parameters for production use.
 
-### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium — Operational Assumption / Threat Model)
+### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium)
 
-**Location:** `create_will`, `top_up`, `distribute`, `cancel_will`
+**Location:** `lib.rs` (`distribute`, `cancel_will`, `top_up`)
 
-Williams assumes that token transfers are 1:1 lossless (`balance_transferred == amount`). When tokens are deposited into the contract:
-```rust
-token::Client::new(&env, &token_addr).transfer(&owner, &contract_address, &amount);
-balances.set(token_addr, prev + amount);
-```
-The internal accounting assumes the contract's actual balance increased by exactly `amount`.
+The contract assumes SEP-41 `transfer` moves exactly the requested `amount`. Fee-on-transfer or
+rebase/deflationary tokens may deliver less than `amount`, so the recorded `will.balance` can
+diverge from the contract's actual token balance.
 
-**Impact:** If a token charges a transfer tax or burns a portion upon transfer (fee-on-transfer or deflationary mechanics), the contract receives `amount - fee` but records `amount`. At release time (`release_inheritance` or `guardian_trigger`), `distribute` attempts to pay out allocations calculated from the recorded balance. The final transfer will fail due to insufficient contract balance, or trigger `DistributionMismatch`, causing the distribution to fail and locking custodied funds.
+**Impact:** Beneficiaries may receive less than their computed share; accounting drift.
 
-**Recommendation & Threat Model Resolution:**
-- Clearly document that standard SEP-41 tokens without transfer fees are required in `README.md` and `SECURITY.md`.
-- Integrators and users must ensure that no fee-on-transfer or deflationary tokens are used with Williams.
+**Recommendation:** Document that only standard SEP-41 tokens without transfer fees are supported,
+or verify balances before/after transfers.
 
----
+### 4.8 Regulated Assets Requiring Trustline Flags (Medium — Informational)
 
-## 5. Summary
+**Location:** `lib.rs` (`distribute`)
 
-| Category | Severity | Count | Status |
-|---|---|---|---|
-| Reentrancy | Critical | 0 | N/A |
-| Authorization Bypass | Critical | 0 | N/A |
-| Integer Overflow/Underflow | Critical | 0 | N/A |
-| Fee-on-Transfer Tokens | Medium | 1 | Documented / Protocol Assumption |
-| Token Trust | Low | 1 | Accepted |
-| Guardian Collusion | Low | 1 | By Design |
-| Front-Running | Low | 1 | By Design |
-| Duplicate Beneficiaries | Low | 1 | Informational |
-| Will ID Enumeration | Low | 1 | Informational |
-| Query Exhaustion | Low | 1 | Informational |
+Stellar assets with the **Clawback Enabled** or **Authorization Required** flags (regulated
+financial instruments, fiat-backed stablecoins) require each holder to have an *authorized*
+trustline. A standard SEP-41 `transfer` to a beneficiary without an authorized trustline fails
+permanently — the issuer must first authorize the beneficiary's trustline (or the asset must be
+reconfigured). The contract cannot grant this authorization itself.
 
-**Overall Assessment:** The contract is secure against all critical vulnerability classes. No high-severity issues were found. All low-severity findings are either by design, informational, or accepted trade-offs.
+**Impact:** Institutional/regulated assets cannot be safely distributed to unvetted beneficiary
+addresses. A failed transfer reverts the whole `distribute` call, so no partial payout is lost,
+but the will cannot be released until every beneficiary is authorized.
 
+**Requirements for regulated Stellar tokens:**
 
----
+1. The token contract must implement SEP-41 `transfer` (and, where used, `transfer_from`).
+2. Every beneficiary must hold a trustline to the asset that is **authorized** by the issuer
+   (`AUTHORIZED_FLAG` set) before `distribute` is called.
+3. For **Clawback Enabled** assets, the issuer retains the ability to claw back funds held by the
+   contract; owners should only use issuers they trust.
+4. For **Authorization Required** assets, the issuer must authorize both the contract's own
+   trustline (to receive funds in `create_will`/`top_up`) and each beneficiary's trustline (to
+   receive funds in `distribute`).
+5. The contract does **not** call `authorize_trustline`/`set_authorized` or `clawback`; those are
+   issuer-side operations performed out-of-band before release.
 
-## 6. Recommendations
+**Integration guide for compliant issuers:**
 
-1. **Run formal audit** before mainnet deployment — this review is a best-effort manual pass, not a substitute for a professional audit.
-2. **Consider token validation** at creation time to prevent user confusion (optional, low priority).
-3. **Add pagination** to `get_wills_by_owner` and `get_wills_by_beneficiary` for production SDK integration.
-4. **Document guardian trust assumptions** clearly in user-facing documentation.
+- Before creating a will with a regulated asset, the issuer (or the owner) must ensure the
+  contract address has an authorized trustline so `create_will`/`top_up` succeed.
+- Before `release_inheritance`/`distribute`, the issuer must authorize each beneficiary's
+  trustline (`set_authorized(beneficiary, true)` on the Stellar asset contract, or the equivalent
+  issuer operation).
+- If a beneficiary's trustline is unauthorized at distribution time, `distribute` reverts
+  atomically; the will remains `Released`-pending and can be retried after the issuer authorizes
+  the trustline. No funds are lost.
+- Issuers using clawback should be aware that funds held by the contract are subject to clawback
+  until distributed.
+
+**Recommendation:** Document these constraints for users of regulated assets and ensure the
+SDK surfaces trustline-authorization errors clearly so operators know to contact the issuer
+before retrying distribution.
