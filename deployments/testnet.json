@@ -1,5 +1,6 @@
 {
   "WillContract": "",
   "network": "testnet",
-  "deployedAt": ""
+  "deployedAt": "",
+  "wasmHash": ""
 }

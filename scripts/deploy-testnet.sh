@@ -33,6 +33,11 @@
 # contract's own `get_contract_version` over RPC and fails loudly, before
 # writing deployments/testnet.json, if it disagrees with the source
 # CONTRACT_VERSION that was supposedly just built and deployed.
+#
+# Bytecode integrity (#124): the local WASM artifact's SHA-256 is computed and
+# logged, then asserted against the deployed contract's on-chain bytecode hash
+# so operators can confirm the deployed instance matches the audited build.
+# The hash is recorded in deployments/testnet.json.
 
 set -euo pipefail
 
@@ -62,6 +67,14 @@ if [[ ! -f "$WASM_PATH" ]]; then
   echo "error: expected wasm artifact at $WASM_PATH, but it was not produced" >&2
   exit 1
 fi
+
+echo "==> Computing SHA-256 of local WASM artifact: $WASM_PATH"
+if command -v sha256sum >/dev/null 2>&1; then
+  LOCAL_WASM_HASH="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
+else
+  LOCAL_WASM_HASH="$(shasum -a 256 "$WASM_PATH" | awk '{print $1}')"
+fi
+echo "==> Local WASM SHA-256: $LOCAL_WASM_HASH"
 
 echo "==> Deploying to '$NETWORK' as identity '$DEPLOY_IDENTITY'"
 CONTRACT_ID="$(stellar contract deploy \
@@ -100,11 +113,37 @@ if [[ "$ONCHAIN_VERSION" != "$EXPECTED_VERSION" ]]; then
 fi
 echo "==> OK: on-chain version $ONCHAIN_VERSION matches source CONTRACT_VERSION"
 
+echo "==> Verifying deployed bytecode hash matches local WASM SHA-256"
+# `stellar contract fetch` retrieves the deployed WASM bytecode for the
+# contract id; hashing it lets us assert the on-chain instance matches the
+# audited local build artifact before recording the deployment.
+FETCHED_WASM="$(mktemp)"
+trap 'rm -f "$FETCHED_WASM"' EXIT
+stellar contract fetch \
+  --id "$CONTRACT_ID" \
+  --network "$NETWORK" \
+  --rpc-url "$RPC_URL" \
+  --out-file "$FETCHED_WASM"
+if command -v sha256sum >/dev/null 2>&1; then
+  DEPLOYED_WASM_HASH="$(sha256sum "$FETCHED_WASM" | awk '{print $1}')"
+else
+  DEPLOYED_WASM_HASH="$(shasum -a 256 "$FETCHED_WASM" | awk '{print $1}')"
+fi
+echo "==> Deployed WASM SHA-256: $DEPLOYED_WASM_HASH"
+
+if [[ "$DEPLOYED_WASM_HASH" != "$LOCAL_WASM_HASH" ]]; then
+  echo "error: deployed bytecode hash $DEPLOYED_WASM_HASH does not match local WASM hash $LOCAL_WASM_HASH" >&2
+  echo "error: the deployed contract does not match the audited local build -- do NOT record this in $OUTPUT_FILE." >&2
+  exit 1
+fi
+echo "==> OK: deployed bytecode hash matches local WASM SHA-256"
+
 cat > "$OUTPUT_FILE" <<JSON
 {
   "WillContract": "$CONTRACT_ID",
   "network": "$NETWORK",
-  "deployedAt": "$DEPLOYED_AT"
+  "deployedAt": "$DEPLOYED_AT",
+  "wasmHash": "$LOCAL_WASM_HASH"
 }
 JSON
 
