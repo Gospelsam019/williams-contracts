@@ -40,3 +40,12 @@ audit:
 
 # Run everything CI runs, in order.
 ci: fmt-check lint test build
+
+# Run mutation testing against the core contract logic to evaluate test-suite
+# quality (#79).  Requires cargo-mutants: `cargo install cargo-mutants`.
+# Each surviving mutant is a logic change the test suite failed to catch.
+#
+# For a quick smoke-check during development, limit scope with:
+#   just mutants --file contracts/will/src/storage.rs
+mutants:
+    cargo mutants --workspace

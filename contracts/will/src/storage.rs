@@ -126,6 +126,15 @@ pub(crate) enum DataKey {
     /// re-reads or re-validates the will, so it still succeeds even if the
     /// will has since been archived.
     FailedPayout(u64, Address, Address),
+    /// Per-owner, per-status index: the list of will ids owned by `address`
+    /// that currently carry `status` (#77).
+    ///
+    /// Maintained alongside `OwnerWills` so that
+    /// `get_wills_by_owner_and_status` / `get_owner_status_page` can
+    /// look up only the relevant subset of ids instead of scanning every will
+    /// the owner has ever created. The footprint is `O(|wills in status|)`
+    /// per read instead of `O(|all owner wills|)`.
+    OwnerStatusWills(Address, WillStatus),
 }
 
 /// The data stored for each guardian vote: the Unix timestamp when the vote
@@ -765,6 +774,114 @@ pub fn get_owner_wills(env: &Env, owner: &Address) -> Vec<u64> {
             .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
     }
     ids.unwrap_or_else(|| Vec::new(env))
+}
+
+// ── Per-owner, per-status index helpers (#77) ────────────────────────────────
+
+/// Adds `will_id` to the per-owner, per-status index for `status`.
+///
+/// Called whenever a will first enters `status` (creation, trigger, emergency
+/// check-in, etc.).  The list is capped at `MAX_WILLS_PER_INDEX` and writes
+/// are skipped when the id is already present, matching the behaviour of the
+/// shared `index_push` helper used by `OwnerWills`.
+pub fn index_owner_status(env: &Env, owner: &Address, status: WillStatus, will_id: u64) {
+    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(will_id) {
+        if ids.len() >= MAX_WILLS_PER_INDEX {
+            // Silently drop rather than panic: the primary OwnerWills index
+            // already enforces the cap before any will can be created, so
+            // this path is unreachable in practice.  If it ever is reached,
+            // failing here would block a status transition, which is worse
+            // than a temporarily incomplete secondary index.
+            return;
+        }
+        ids.push_back(will_id);
+        env.storage().persistent().set(&key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+}
+
+/// Removes `will_id` from the per-owner, per-status index for `status`.
+///
+/// Called whenever a will leaves `status` (transition to a new status,
+/// removal from the owner index on cancellation/release, or archival).
+/// Returns without writing when the id is absent.
+pub fn remove_owner_status_index(env: &Env, owner: &Address, status: WillStatus, will_id: u64) {
+    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
+        return;
+    };
+    if ids.first_index_of(will_id).is_none() {
+        return;
+    }
+    let mut new_ids = Vec::new(env);
+    for id in ids.iter() {
+        if id != will_id {
+            new_ids.push_back(id);
+        }
+    }
+    if new_ids.is_empty() {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+}
+
+/// Moves `will_id` from the `from` status bucket to the `to` status bucket
+/// in the per-owner, per-status index.
+///
+/// This is the single call-site a status transition needs: it removes the id
+/// from the old bucket and inserts it into the new one atomically (within the
+/// same contract invocation).
+pub fn transition_owner_status_index(
+    env: &Env,
+    owner: &Address,
+    from: WillStatus,
+    to: WillStatus,
+    will_id: u64,
+) {
+    remove_owner_status_index(env, owner, from, will_id);
+    index_owner_status(env, owner, to, will_id);
+}
+
+/// Returns the ids from the per-owner, per-status index for `status`, also
+/// refreshing the TTL so a read-only query keeps the entry alive.
+pub fn get_owner_status_wills(env: &Env, owner: &Address, status: WillStatus) -> Vec<u64> {
+    let key = DataKey::OwnerStatusWills(owner.clone(), status);
+    let ids: Option<Vec<u64>> = env.storage().persistent().get(&key);
+    if ids.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+    ids.unwrap_or_else(|| Vec::new(env))
+}
+
+/// Removes `will_id` from every per-owner, per-status bucket it might occupy.
+///
+/// Used by `archive_will` and any cleanup path that removes a will from the
+/// owner index without knowing which status it was last in.
+pub fn remove_owner_status_index_all(env: &Env, owner: &Address, will_id: u64) {
+    for status in [
+        WillStatus::PendingConfirmation,
+        WillStatus::Active,
+        WillStatus::Triggered,
+        WillStatus::Released,
+        WillStatus::Cancelled,
+        WillStatus::Settled,
+    ] {
+        remove_owner_status_index(env, owner, status, will_id);
+    }
 }
 
 /// Returns the list of will ids `beneficiary` is named in.
@@ -1411,6 +1528,11 @@ pub fn archive_will(env: &Env, will: &Will) {
     // Remove from owner index, reusing the shared helper so the TTL is bumped
     // consistently with every other removal path (fixes #332).
     remove_owner_index(env, &will.owner, will.id);
+
+    // Remove from the per-owner, per-status index (#77): the will may be in
+    // Released, Cancelled, or Settled when archive_will is called, so sweep
+    // all buckets to avoid leaving a dangling id behind.
+    remove_owner_status_index_all(env, &will.owner, will.id);
 
     // If the will was in Triggered status, remove it from the global
     // TriggeredWills index so keepers/indexers never see a dangling id

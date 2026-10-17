@@ -101,6 +101,13 @@ mod regression_test;
 #[cfg(test)]
 mod test_support;
 
+/// Reentrancy regression tests for issue #80: verifies that `top_up`,
+/// `merge_wills`, `split_will`, and `reveal_and_claim` are all protected by
+/// the checks-effects-interactions ordering when a malicious SEP-41 token
+/// calls back into the contract from inside `transfer`.
+#[cfg(test)]
+mod reentrancy_test;
+
 /// Unit tests for the `will_created` event payload extended with
 /// per-token breakdowns (see event_snapshot_test module docs).
 #[cfg(test)]
@@ -947,6 +954,7 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::index_owner_status(&env, &owner, status, will_id);
         storage::increment_active_will_count(&env);
 
         // Increment locked value for each token in this will
@@ -1046,6 +1054,13 @@ impl WillContract {
         );
         assert_valid_percentages(&env, &will.beneficiaries, &will.hashed_beneficiaries);
 
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::PendingConfirmation,
+            WillStatus::Active,
+            will_id,
+        );
         will.status = WillStatus::Active;
         will.last_checkin = now;
         will.confirmation_deadline = None;
@@ -1113,6 +1128,12 @@ impl WillContract {
         storage::decrement_active_will_count(&env);
         storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
 
+        storage::remove_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::PendingConfirmation,
+            will_id,
+        );
         will.balance = 0;
         will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
@@ -1372,6 +1393,13 @@ impl WillContract {
         // whenever a keeper happened to call `trigger_will` (#457). This makes
         // the release time a pure function of the owner's last check-in, so a
         // delayed trigger can neither postpone nor accelerate the release.
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Active,
+            WillStatus::Triggered,
+            will_id,
+        );
         will.status = WillStatus::Triggered;
         will.trigger_time = Some(deadline);
         let grace_period_ends = grace_deadline(&env, &will);
@@ -1441,6 +1469,13 @@ impl WillContract {
         storage::reset_guardian_votes(&env, &will);
         storage::reset_guardian_cancel_votes(&env, &will);
 
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Triggered,
+            WillStatus::Active,
+            will_id,
+        );
         will.status = WillStatus::Active;
         will.trigger_time = None;
         will.last_checkin = now;
@@ -1750,6 +1785,12 @@ impl WillContract {
         // permanently inflated (#353). A second per-token loop here would
         // deduct each total twice (#5).
 
+        storage::remove_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Active,
+            will_id,
+        );
         will.balance = 0;
         will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
@@ -1800,6 +1841,13 @@ impl WillContract {
             WillError::WillNotReleased,
         );
 
+        storage::transition_owner_status_index(
+            &env,
+            &will.owner,
+            WillStatus::Released,
+            WillStatus::Settled,
+            will_id,
+        );
         will.status = WillStatus::Settled;
         storage::save_will(&env, &will);
 
@@ -3431,6 +3479,13 @@ impl WillContract {
             // starts clean if the will is ever triggered again.
             storage::reset_guardian_votes(&env, &will);
 
+            storage::transition_owner_status_index(
+                &env,
+                &will.owner,
+                WillStatus::Triggered,
+                WillStatus::Active,
+                will_id,
+            );
             will.status = WillStatus::Active;
             will.trigger_time = None;
             will.last_checkin = now;
@@ -3824,6 +3879,7 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::index_owner_status(&env, &owner, WillStatus::Active, will_id);
         storage::increment_active_will_count(&env);
         storage::adjust_locked_for_balances(&env, &will.balances, 1);
 
@@ -4035,6 +4091,7 @@ impl WillContract {
             };
             storage::save_will(&env, &will);
             storage::index_by_owner(&env, &owner, will_id);
+            storage::index_owner_status(&env, &owner, will.status, will_id);
             storage::increment_active_will_count(&env);
             storage::adjust_locked_for_balances(&env, &will.balances, 1);
 
@@ -4385,9 +4442,14 @@ impl WillContract {
         // Decrement active will count since will_b is now cancelled
         storage::decrement_active_will_count(&env);
 
-        // Drop will_b from the owner index now that it is a terminal,
-        // zeroed-out placeholder — otherwise get_wills_by_owner keeps
-        // surfacing it alongside the surviving will_a indefinitely.
+        // Drop will_b from the owner status index and owner index now that it
+        // is a terminal, zeroed-out placeholder.
+        storage::remove_owner_status_index(
+            &env,
+            &owner,
+            WillStatus::Active,
+            will_id_b,
+        );
         storage::remove_owner_index(&env, &owner, will_id_b);
 
         // Save both wills
@@ -4897,6 +4959,7 @@ impl WillContract {
         };
         storage::save_will(&env, &child);
         storage::index_by_owner(&env, &source.owner, new_id);
+        storage::index_owner_status(&env, &source.owner, WillStatus::Active, new_id);
         // The child is a new live will. Its balance moved out of the source,
         // so the locked totals are unchanged. The source was already counted
         // as active, so this nets +1 live will for the child alone (#7).
@@ -5801,8 +5864,11 @@ fn assert_valid_guardians(env: &Env, owner: &Address, guardians: &Vec<Address>) 
 
 /// Filters `owner`'s wills by `status` and cuts one page from the matches.
 ///
-/// Every indexed will is inspected so `total_count` is exact; the owner index
-/// is capped at `storage::MAX_WILLS_PER_INDEX`, which bounds the cost.
+/// Uses the [`storage::DataKey::OwnerStatusWills`] per-status index (#77) so
+/// the lookup is `O(|wills in status|)` rather than `O(|all owner wills|)`.
+/// The index is maintained at every status transition, so it is always an
+/// exact reflection of the live wills in that status — `total_count` is still
+/// exact, and no full will load is required just to filter by status.
 fn wills_by_owner_and_status_page(
     env: &Env,
     owner: &Address,
@@ -5812,24 +5878,24 @@ fn wills_by_owner_and_status_page(
 ) -> WillPage {
     let page_size = limit.min(storage::MAX_PAGE_SIZE);
     let cursor_val = cursor.unwrap_or(0);
-    let ids = storage::get_owner_wills(env, owner);
+
+    // Use the per-status index so we only touch the subset of will ids that
+    // currently carry `status`, not every will the owner has ever created.
+    let ids = storage::get_owner_status_wills(env, owner, status);
 
     let mut wills = Vec::new(env);
     let mut total_count: u32 = 0;
     let mut has_more = false;
     for id in ids.iter() {
-        let will = match storage::load_will(env, id) {
-            Ok(w) => w,
-            Err(e) => panic_with_error!(env, e),
-        };
-        if will.status != status {
-            continue;
-        }
         total_count += 1;
         if id <= cursor_val {
             continue;
         }
         if wills.len() < page_size {
+            let will = match storage::load_will(env, id) {
+                Ok(w) => w,
+                Err(e) => panic_with_error!(env, e),
+            };
             wills.push_back(will);
         } else {
             has_more = true;
@@ -6255,6 +6321,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     // it has now either been paid out or never held anything to reserve.
     will.balances = hashed_reserves;
     will.balance = will.balances.get(will.token.clone()).unwrap_or(0);
+
+    // Move the will out of its current status bucket (Active or Triggered)
+    // into Released, then prune the owner status index since released wills
+    // are removed from the owner index entirely (#71).
+    storage::remove_owner_status_index_all(env, &will.owner, will.id);
+    storage::index_owner_status(env, &will.owner, WillStatus::Released, will.id);
     will.status = WillStatus::Released;
 
     // Prune stale index entries (#71): remove the released will from the
