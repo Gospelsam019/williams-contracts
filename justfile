@@ -38,14 +38,22 @@ fmt-check:
 audit:
     cargo audit --file Cargo.lock --deny warnings
 
-# Run everything CI runs, in order.
-ci: fmt-check lint test build
+# Verify the exported contract spec is up to date (fails if stale).
+spec:
+    scripts/export-spec.sh --check
 
-# Run mutation testing against the core contract logic to evaluate test-suite
-# quality (#79).  Requires cargo-mutants: `cargo install cargo-mutants`.
-# Each surviving mutant is a logic change the test suite failed to catch.
-#
-# For a quick smoke-check during development, limit scope with:
-#   just mutants --file contracts/will/src/storage.rs
-mutants:
-    cargo mutants --workspace
+# Profile resource costs of the contract entry points.
+costs:
+    scripts/check_resource_costs.sh
+
+# Deploy the contract to testnet.
+deploy-testnet:
+    scripts/deploy-testnet.sh
+
+# Run the `create_will` fuzz target. Requires cargo-fuzz:
+# `cargo install cargo-fuzz` and a nightly toolchain.
+fuzz-create:
+    cargo +nightly fuzz run create_will
+
+# Run everything CI runs, in order.
+ci: fmt-check lint test build spec

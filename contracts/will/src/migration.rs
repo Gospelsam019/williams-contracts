@@ -18,6 +18,28 @@
 //!
 //! See the "Storage schema versioning" section of CONTRIBUTING.md for the
 //! step-by-step process of introducing a new version.
+//!
+//! ## Schema v2 field ordering (issue #117)
+//!
+//! Soroban XDR serializes struct fields in declaration order, so the order of
+//! `Will`'s fields directly affects the encoded byte layout. In v2 the fields
+//! are grouped by kind to keep fixed-size scalars and addresses adjacent:
+//!
+//! 1. Identity and token metadata: `id`, `owner`, `token`, `is_native`,
+//!    `balance`, `balances`.
+//! 2. Beneficiaries: `beneficiaries`, `hashed_beneficiaries`.
+//! 3. Timing: `checkin_period_days`, `grace_period_days`, `last_checkin`,
+//!    `trigger_time`, `confirmation_deadline`.
+//! 4. Status and guardians: `status`, `guardians`, `guardian_vote_weight`,
+//!    `guardian_votes`, `guardian_cancel_vote_weight`, `guardian_cancel_votes`,
+//!    `guardian_threshold`, `guardian_list_updated_at`.
+//! 5. Versioning and payout config: `schema_version`, `keeper_bounty_bps`,
+//!    `keeper_bounty_token`, `delegate`.
+//!
+//! Because XDR maps are keyed by field name, this reordering is wire-compatible
+//! with v1 entries: `decode_will` still lifts them via [`legacy::WillV1`], and
+//! the v1 → v2 step only stamps the version. The legacy struct below keeps its
+//! original declaration order verbatim so old entries continue to decode.
 
 use soroban_sdk::{Env, TryFromVal, Val};
 
@@ -50,7 +72,8 @@ pub mod legacy {
     /// itself shipped in (#446), with `keeper_bounty_bps` and `delegate`
     /// already present.
     ///
-    /// Superseded by v2, which added `Will::keeper_bounty_token` (#109).
+    /// Superseded by v2, which added `Will::keeper_bounty_token` (#109) and
+    /// regrouped the field declaration order for byte compactness (#117).
     #[contracttype]
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct WillV1 {
@@ -89,10 +112,10 @@ pub mod legacy {
             Will {
                 id: self.id,
                 owner: self.owner,
-                balances: self.balances,
                 token: self.token,
                 is_native: self.is_native,
                 balance: self.balance,
+                balances: self.balances,
                 beneficiaries: self.beneficiaries,
                 hashed_beneficiaries: self.hashed_beneficiaries,
                 checkin_period_days: self.checkin_period_days,
@@ -160,8 +183,9 @@ fn migrate_v0_to_v1(_env: &Env, mut will: Will) -> Will {
     will
 }
 
-/// v1 → v2: v2 added `Will::keeper_bounty_token` (#109). `decode_will` has
-/// already lifted the entry into the current shape with the new field
+/// v1 → v2: v2 added `Will::keeper_bounty_token` (#109) and regrouped the
+/// `Will` field declaration order for byte compactness (#117). `decode_will`
+/// has already lifted the entry into the current shape with the new field
 /// defaulted to `None` (proportional bounty split), so the step only stamps
 /// the new version.
 fn migrate_v1_to_v2(_env: &Env, mut will: Will) -> Will {
