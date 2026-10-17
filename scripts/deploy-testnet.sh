@@ -34,10 +34,10 @@
 # writing deployments/testnet.json, if it disagrees with the source
 # CONTRACT_VERSION that was supposedly just built and deployed.
 #
-# Bytecode integrity (#124): the local WASM artifact's SHA-256 is computed and
-# logged, then asserted against the deployed contract's on-chain bytecode hash
-# so operators can confirm the deployed instance matches the audited build.
-# The hash is recorded in deployments/testnet.json.
+# Deployment artifact (#87): deployments/testnet.json records the concrete
+# contract ID, the network, an ISO-8601 deployment timestamp, and the SHA-256
+# hash of the deployed WASM bytecode so the artifact can be verified against
+# the current release build.
 
 set -euo pipefail
 
@@ -68,13 +68,16 @@ if [[ ! -f "$WASM_PATH" ]]; then
   exit 1
 fi
 
-echo "==> Computing SHA-256 of local WASM artifact: $WASM_PATH"
+echo "==> Computing SHA-256 hash of deployed WASM bytecode"
 if command -v sha256sum >/dev/null 2>&1; then
-  LOCAL_WASM_HASH="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
+  WASM_HASH="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
 else
-  LOCAL_WASM_HASH="$(shasum -a 256 "$WASM_PATH" | awk '{print $1}')"
+  WASM_HASH="$(shasum -a 256 "$WASM_PATH" | awk '{print $1}')"
 fi
-echo "==> Local WASM SHA-256: $LOCAL_WASM_HASH"
+if [[ -z "$WASM_HASH" ]]; then
+  echo "error: failed to compute SHA-256 hash of $WASM_PATH" >&2
+  exit 1
+fi
 
 echo "==> Deploying to '$NETWORK' as identity '$DEPLOY_IDENTITY'"
 CONTRACT_ID="$(stellar contract deploy \
@@ -90,7 +93,7 @@ fi
 
 DEPLOYED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-echo "==> Deployed WillContract: $CONTRACT_ID at $DEPLOYED_AT"
+echo "==> Deployed WillContract: $CONTRACT_ID at $DEPLOYED_AT (wasm sha256: $WASM_HASH)"
 
 echo "==> Verifying deployed contract's get_contract_version matches source CONTRACT_VERSION"
 EXPECTED_VERSION_RAW="$(grep -E '^pub const CONTRACT_VERSION: u32 = ' "$LIB_RS" | sed -E 's/^pub const CONTRACT_VERSION: u32 = ([0-9_]+);.*/\1/')"
@@ -143,7 +146,7 @@ cat > "$OUTPUT_FILE" <<JSON
   "WillContract": "$CONTRACT_ID",
   "network": "$NETWORK",
   "deployedAt": "$DEPLOYED_AT",
-  "wasmHash": "$LOCAL_WASM_HASH"
+  "wasmHash": "$WASM_HASH"
 }
 JSON
 
