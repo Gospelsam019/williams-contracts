@@ -425,3 +425,6 @@ This repo participates in the **Stellar Wave Program** on [Drips](https://drips.
 
 <!-- handsoff-issue-115 -->
 - #115: Storage Tombstone Fragmentation Post-Archival Consumes Ledger Rent
+
+<!-- handsoff-issue-116 -->
+- #116: Excessive Memory Clone Operations in merge_beneficiaries and merge_guardians
