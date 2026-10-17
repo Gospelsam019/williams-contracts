@@ -512,7 +512,79 @@ pub fn recompute_protocol_stats(env: &Env) -> ProtocolStats {
     }
 }
 
-/// Persists a will's state and refreshes its storage TTL.
+/// Compares stored protocol stats against a fresh full-scan recomputation,
+/// returning `(consistent, discrepancies, computed_active_count)` without
+/// ever holding a complete second copy of `ProtocolStats` in memory (#76).
+///
+/// `discrepancies` contains only the [`TokenLockedBalance`] entries where the
+/// stored and computed totals differ (including tokens present in one side but
+/// not the other). When the stats are consistent the list is empty, so the
+/// caller can return a lightweight `ProtocolStatsAudit` regardless of how many
+/// tokens the protocol tracks.
+///
+/// This is the building block for `audit_protocol_stats`; for a full copy of
+/// the recomputed stats use `recompute_protocol_stats` or the chunked variant.
+pub fn compare_protocol_stats(
+    env: &Env,
+    stored: &ProtocolStats,
+) -> (bool, Vec<TokenLockedBalance>, u64) {
+    let last_id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextWillId)
+        .unwrap_or(0);
+
+    let mut computed_active: u64 = 0;
+    // Accumulate computed totals into a Map; we compare against stored
+    // token-by-token after the scan without keeping a full ProtocolStats copy.
+    let mut computed_totals: Map<Address, i128> = Map::new(env);
+    let mut id = 1u64;
+    while id <= last_id {
+        if let Some(will) = env
+            .storage()
+            .persistent()
+            .get::<_, Will>(&DataKey::Will(id))
+        {
+            if is_live_status(will.status) {
+                computed_active += 1;
+                for (token, amount) in will.balances.iter() {
+                    let prev = computed_totals.get(token.clone()).unwrap_or(0);
+                    computed_totals.set(token, prev + amount);
+                }
+            }
+        }
+        id += 1;
+    }
+
+    let mut discrepancies: Vec<TokenLockedBalance> = Vec::new(env);
+    let mut consistent = computed_active == stored.active_will_count;
+
+    // Check every token in stored against computed.
+    for entry in stored.total_locked_by_token.iter() {
+        let computed_total = computed_totals.get(entry.token.clone()).unwrap_or(0);
+        computed_totals.remove(entry.token.clone());
+        if computed_total != entry.total_locked {
+            consistent = false;
+            discrepancies.push_back(TokenLockedBalance {
+                token: entry.token,
+                total_locked: computed_total,
+            });
+        }
+    }
+    // Any token in computed but not in stored is also a discrepancy.
+    for (token, total) in computed_totals.iter() {
+        if total != 0 {
+            consistent = false;
+            discrepancies.push_back(TokenLockedBalance {
+                token,
+                total_locked: total,
+            });
+        }
+    }
+
+    (consistent, discrepancies, computed_active)
+}
+
 /// Persists a will's state, refreshing its storage TTL unless the will has
 /// reached a terminal state.
 ///
@@ -644,7 +716,70 @@ fn index_push(env: &Env, key: DataKey, will_id: u64) {
 pub fn assert_index_capacity(env: &Env, owner: &Address, beneficiaries: &Vec<Beneficiary>) {
     assert_single_index_capacity(env, &DataKey::OwnerWills(owner.clone()));
     for beneficiary in beneficiaries.iter() {
+        // Lazily trim stale terminal will IDs from the beneficiary's reverse
+        // index before checking capacity (#75). A will whose storage entry has
+        // been TTL-archived by the network (or reached a terminal status and
+        // was never explicitly archived) leaves its ID in the beneficiary's
+        // index indefinitely. Without trimming, a beneficiary on enough
+        // historical wills permanently exhausts `MAX_WILLS_PER_INDEX` even
+        // though they hold no live claims.
+        trim_stale_beneficiary_index(env, &beneficiary.address);
         assert_single_index_capacity(env, &DataKey::BeneficiaryWills(beneficiary.address.clone()));
+    }
+}
+
+/// Removes IDs of wills that are no longer live from the `BeneficiaryWills`
+/// index for `beneficiary`.
+///
+/// A will ID is considered stale if its persistent-storage entry is absent
+/// (TTL-archived by the network) or its status is a terminal state
+/// (`Released`, `Cancelled`, or `Settled`). Stale IDs count toward
+/// `MAX_WILLS_PER_INDEX` and permanently block the beneficiary from being
+/// named on new wills once the cap is reached (#75). By purging them here,
+/// before the capacity check in `assert_index_capacity`, we reclaim index
+/// slots that the normal release/cancel/archive paths should have freed.
+///
+/// This is a **write**: when stale IDs are found the trimmed list is written
+/// back to persistent storage. It is called only from `assert_index_capacity`,
+/// which runs inside `create_will` before the token transfer, so the write is
+/// safe even in that context.
+fn trim_stale_beneficiary_index(env: &Env, beneficiary: &Address) {
+    let key = DataKey::BeneficiaryWills(beneficiary.clone());
+    let ids: Vec<u64> = match env.storage().persistent().get(&key) {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut live_ids: Vec<u64> = Vec::new(env);
+    let mut found_stale = false;
+
+    for id in ids.iter() {
+        let is_live = match env
+            .storage()
+            .persistent()
+            .get::<_, Will>(&DataKey::Will(id))
+        {
+            // Will entry is present: keep it only if it is in a non-terminal
+            // (live) state.
+            Some(will) => is_live_status(will.status),
+            // Will entry is absent: either TTL-archived by the network or
+            // explicitly archived via `archive_will`. Either way, stale.
+            None => false,
+        };
+        if is_live {
+            live_ids.push_back(id);
+        } else {
+            found_stale = true;
+        }
+    }
+
+    if found_stale {
+        env.storage().persistent().set(&key, &live_ids);
+        if !live_ids.is_empty() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+        }
     }
 }
 

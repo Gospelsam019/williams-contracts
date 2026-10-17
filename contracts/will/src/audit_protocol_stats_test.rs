@@ -63,7 +63,17 @@ fn audit_reports_consistent_after_normal_operations() {
         audit.consistent,
         "stored and recomputed stats must agree after a single create_will"
     );
-    assert_eq!(audit.stored, audit.computed);
+    // When consistent, computed carries only discrepancies (none) to avoid
+    // materialising a full second copy of the token-balance list (#76).
+    assert!(
+        audit.computed.total_locked_by_token.is_empty(),
+        "computed.total_locked_by_token must be empty when stats are consistent (#76)"
+    );
+    assert_eq!(
+        audit.computed.active_will_count,
+        audit.stored.active_will_count,
+        "computed.active_will_count must match stored when consistent"
+    );
     assert_eq!(audit.stored.active_will_count, 1);
 }
 
@@ -171,9 +181,29 @@ fn audit_detects_drift_and_repair_fixes_it() {
         audit.stored.active_will_count,
         real_computed.active_will_count + 41
     );
+    // With #76, `computed` carries only discrepant token entries (sparse),
+    // not a full copy of recomputed stats.  Verify the discrepancy for our
+    // token shows the correct recomputed total.
     assert_eq!(
-        audit.computed, real_computed,
-        "the recomputed side must be unaffected by the corrupted stored value"
+        audit.computed.active_will_count,
+        real_computed.active_will_count,
+        "computed.active_will_count must reflect the true recomputed count"
+    );
+    let discrepant_token = audit
+        .computed
+        .total_locked_by_token
+        .iter()
+        .find(|e| e.token == token_address)
+        .expect("token_address must appear in computed discrepancies");
+    assert_eq!(
+        discrepant_token.total_locked,
+        real_computed
+            .total_locked_by_token
+            .iter()
+            .find(|e| e.token == token_address)
+            .map(|e| e.total_locked)
+            .unwrap_or(0),
+        "discrepant computed total must equal the true recomputed total"
     );
 
     // repair_protocol_stats() must overwrite the drifted stored value with

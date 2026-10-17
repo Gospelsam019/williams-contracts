@@ -3041,10 +3041,24 @@ impl WillContract {
     ///
     /// Cost grows linearly with the number of wills ever created; once that
     /// exceeds the per-invocation budget, run it via simulation only.
+    ///
+    /// Memory usage: the `computed` field of the returned [`ProtocolStatsAudit`]
+    /// is **sparse** — it contains only the token entries that differ from
+    /// `stored` (i.e. the discrepancies). When `consistent == true` its
+    /// `total_locked_by_token` list is empty. This avoids holding two full
+    /// copies of the token-balance list simultaneously, which on a large
+    /// registry would exceed Soroban's transaction memory budget (#76).
     pub fn audit_protocol_stats(env: Env) -> ProtocolStatsAudit {
         let stored = storage::get_protocol_stats(&env);
-        let computed = storage::recompute_protocol_stats(&env);
-        let consistent = stats_match(&stored, &computed);
+        let (consistent, discrepancies, computed_active_count) =
+            storage::compare_protocol_stats(&env, &stored);
+        // `computed` only carries the discrepant token entries; callers who
+        // need the full computed stats for every token should call
+        // `recompute_protocol_stats_chunk` in pages instead.
+        let computed = ProtocolStats {
+            active_will_count: computed_active_count,
+            total_locked_by_token: discrepancies,
+        };
         ProtocolStatsAudit {
             stored,
             computed,
@@ -5568,33 +5582,6 @@ fn grace_period_end(env: &Env, will: &Will) -> u64 {
     }
 }
 
-/// Compares two `ProtocolStats` by value, treating a missing token as a zero
-/// total and ignoring token order.
-fn stats_match(a: &ProtocolStats, b: &ProtocolStats) -> bool {
-    if a.active_will_count != b.active_will_count {
-        return false;
-    }
-    let total_of = |stats: &ProtocolStats, token: &Address| -> i128 {
-        for entry in stats.total_locked_by_token.iter() {
-            if entry.token == *token {
-                return entry.total_locked;
-            }
-        }
-        0
-    };
-    for entry in a.total_locked_by_token.iter() {
-        if total_of(b, &entry.token) != entry.total_locked {
-            return false;
-        }
-    }
-    for entry in b.total_locked_by_token.iter() {
-        if total_of(a, &entry.token) != entry.total_locked {
-            return false;
-        }
-    }
-    true
-}
-
 /// Loads a will by id, panicking with [`WillError::WillNotFound`] if it does not exist.
 fn load_will(env: &Env, will_id: u64) -> Will {
     match storage::load_will(env, will_id) {
@@ -6432,7 +6419,13 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                 if let Allocation::FixedAmount(amt) = beneficiary.allocation {
                     let share = amt.min(remaining).max(0);
                     remaining -= share;
-                    shares.push_back((beneficiary.address.clone(), share));
+                    // Guard zero-value shares: some SEP-41 tokens reject a
+                    // transfer(0) call, which would abort the whole release.
+                    // Skip beneficiaries whose share rounds to zero rather
+                    // than queuing a zero transfer (#73).
+                    if share > 0 {
+                        shares.push_back((beneficiary.address.clone(), share));
+                    }
                 }
             }
         }
@@ -6452,7 +6445,13 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                     percentage_remaining -= portion;
                     portion
                 };
-                shares.push_back((beneficiary.address.clone(), share));
+                // Guard zero-value shares: some SEP-41 tokens reject a
+                // transfer(0) call, which would abort the whole release.
+                // Skip beneficiaries whose share rounds to zero rather than
+                // queuing a zero transfer (#73).
+                if share > 0 {
+                    shares.push_back((beneficiary.address.clone(), share));
+                }
             }
         }
 
@@ -6517,6 +6516,41 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         }
 
         transfer_plan.push_back((token_addr, shares));
+    }
+
+    // --- PRE-FLIGHT: verify the contract's actual vault balance covers each
+    // planned payout before committing any state (#74).
+    //
+    // `distribute` assumes internal accounting is sound, but external
+    // insolvency — a hacked token, accounting corruption, or a fee-on-
+    // transfer token deposited in error — could make the real vault balance
+    // lower than `will.balances[token]`. If that happens, the first
+    // beneficiary transfer succeeds, the second runs short, and the whole
+    // distribution is aborted mid-flight by the token contract. Because state
+    // was already committed (status = Released, balances cleared) the will is
+    // stuck: it looks released but nobody can receive their inheritance.
+    //
+    // Checking up-front lets the call abort cleanly with `DistributionMismatch`
+    // before any state is mutated, keeping the will actionable (its status
+    // stays Active/Triggered and a caller can retry or cancel once the
+    // insolvency is resolved).
+    //
+    // The check reads the vault's *current* real balance (one cross-contract
+    // read per token) and compares it against the *total* this distribution
+    // intends to pay out for that token.  `will.balances[token]` is exactly
+    // that total: it has not yet been mutated and is the same value whose
+    // conservation was verified by the per-token `planned == total` check above.
+    {
+        let contract_address = env.current_contract_address();
+        for (token_addr, total) in will.balances.iter() {
+            if total == 0 {
+                continue;
+            }
+            let vault_balance = token::Client::new(env, &token_addr).balance(&contract_address);
+            if vault_balance < total {
+                panic_with_error!(env, WillError::DistributionMismatch);
+            }
+        }
     }
 
     // --- EFFECTS: mutate and persist all state before any external call ---
