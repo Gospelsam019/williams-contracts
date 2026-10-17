@@ -455,6 +455,26 @@ mod issue_19_test;
 #[cfg(test)]
 mod issue_20_test;
 
+/// Regression tests for issue #1: `archive_will` must refuse archival while
+/// any hashed beneficiary slot in a `Released` will is still unclaimed.
+#[cfg(test)]
+mod issue_1_archive_hashed_test;
+
+/// Tests for issue #2: `guardian_cancel_pending_will` lets a guardian quorum
+/// cancel a stalled `PendingConfirmation` will and refund the owner.
+#[cfg(test)]
+mod issue_2_guardian_pending_test;
+
+/// Tests for issue #3: `batch_check_in` now accepts an authorized delegate as
+/// `caller`, mirroring the single-will `check_in` entrypoint.
+#[cfg(test)]
+mod issue_3_batch_delegate_test;
+
+/// Tests for issue #4: `top_up` probes new token addresses against the SEP-41
+/// `decimals()` interface before accepting a transfer.
+#[cfg(test)]
+mod issue_4_topup_sep41_test;
+
 use soroban_sdk::{
     contract, contractimpl, log, panic_with_error, symbol_short, token, xdr::ToXdr, Address, Bytes,
     Env, Map, Vec,
@@ -1144,6 +1164,143 @@ impl WillContract {
         events::will_cancelled(&env, will_id, &owner, token_count);
     }
 
+    /// Allows a guardian quorum to cancel a will that is stuck in
+    /// `PendingConfirmation` and return the owner's deposited funds (#2).
+    ///
+    /// When an owner creates a will with a confirmation delay but then loses
+    /// access to their signing keys or becomes incapacitated before calling
+    /// `confirm_will`, the will remains in `PendingConfirmation` indefinitely.
+    /// `refund_unconfirmed_will` handles the automated timeout path
+    /// (permissionless, after `confirmation_deadline + 7 days`), but guardians
+    /// named on the will need a faster recovery path if they know the owner is
+    /// incapacitated before the timeout elapses.
+    ///
+    /// Once the confirmation deadline has passed (i.e. the owner failed to
+    /// confirm in time), a guardian quorum (`guardian_threshold` accumulated
+    /// vote weight) can force the will to `Cancelled` and refund all deposited
+    /// tokens to `will.owner` without waiting for the full 7-day grace margin.
+    /// Votes are deduplicated and expire after `grace_period_days` exactly
+    /// as they do in `guardian_trigger`.
+    ///
+    /// # Parameters
+    /// - `will_id`: the unconfirmed will to cancel.
+    /// - `guardian`: the guardian casting a cancellation vote; must authorize.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::WillNotConfirmed`] if the will is not in
+    ///   `PendingConfirmation` status.
+    /// - [`WillError::ConfirmationWindowExpired`] if the will does not have a
+    ///   confirmation deadline set.
+    /// - [`WillError::CheckinNotDue`] if the confirmation deadline has not yet
+    ///   elapsed (the owner still has time to confirm; guardians cannot
+    ///   interfere during a live confirmation window).
+    /// - [`WillError::NotGuardian`] if `guardian` is not a named guardian of
+    ///   this will.
+    /// - [`WillError::GuardianNotConsented`] if the guardian has not yet
+    ///   accepted their role.
+    /// - [`WillError::AlreadyVoted`] if this guardian has already cast a vote
+    ///   in the current cycle.
+    pub fn guardian_cancel_pending_will(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        if will.status != WillStatus::PendingConfirmation {
+            panic_with_error!(&env, WillError::WillNotConfirmed);
+        }
+
+        let deadline = match will.confirmation_deadline {
+            Some(d) => d,
+            None => panic_with_error!(&env, WillError::ConfirmationWindowExpired),
+        };
+
+        let now = env.ledger().timestamp();
+        // Guardians may only vote after the confirmation deadline has elapsed —
+        // while the window is live the owner can still confirm, so guardian
+        // interference would be premature.
+        if now <= deadline {
+            panic_with_error!(&env, WillError::CheckinNotDue);
+        }
+
+        let weight = match will.guardians.iter().find(|g| g.address == guardian) {
+            Some(g) => {
+                if g.consent != GuardianConsent::Accepted {
+                    panic_with_error!(&env, WillError::GuardianNotConsented);
+                }
+                g.weight
+            }
+            None => panic_with_error!(&env, WillError::NotGuardian),
+        };
+
+        // Re-use the trigger-vote namespace for deduplication; expiry is
+        // anchored to `grace_period_days` for consistency with guardian_trigger.
+        let expiry_days = will.grace_period_days;
+        if storage::has_guardian_voted(&env, will_id, &guardian, now, expiry_days) {
+            panic_with_error!(&env, WillError::AlreadyVoted);
+        }
+        storage::set_guardian_voted(&env, will_id, &guardian, now, GuardianVoteReason::Other);
+
+        let (live_weight, live_votes) =
+            storage::recount_guardian_votes(&env, &will, now, expiry_days);
+        will.guardian_vote_weight = live_weight;
+        will.guardian_votes = live_votes;
+        storage::save_will(&env, &will);
+
+        events::guardian_voted(&env, will_id, &guardian, weight, will.guardian_vote_weight);
+
+        if will.guardian_vote_weight >= will.guardian_threshold {
+            // Quorum reached: cancel the will and refund the owner.
+            let owner = will.owner.clone();
+            let contract_address = env.current_contract_address();
+            let token_count = will.balances.len();
+            let balances_snapshot = will.balances.clone();
+            let prior_status = will.status;
+
+            storage::reset_guardian_votes(&env, &will);
+
+            storage::decrement_active_will_count(&env);
+            storage::adjust_locked_for_balances(&env, &balances_snapshot, -1);
+
+            will.balance = 0;
+            will.balances = Map::new(&env);
+            will.status = WillStatus::Cancelled;
+            will.confirmation_deadline = None;
+            will.guardian_vote_weight = 0;
+            will.guardian_votes = 0;
+
+            storage::remove_owner_index(&env, &owner, will_id);
+            for beneficiary in will.beneficiaries.iter() {
+                storage::remove_beneficiary_index(&env, &beneficiary.address, will_id);
+            }
+
+            storage::save_will(&env, &will);
+
+            record_transition(
+                &env,
+                will_id,
+                prior_status,
+                WillStatus::Cancelled,
+                &guardian,
+                symbol_short!("gcancel"),
+            );
+
+            // --- INTERACTIONS ---
+            for (token_addr, balance) in balances_snapshot.iter() {
+                if balance > 0 {
+                    token::Client::new(&env, &token_addr).transfer(
+                        &contract_address,
+                        &owner,
+                        &balance,
+                    );
+                }
+            }
+
+            events::will_cancelled(&env, will_id, &owner, token_count);
+        }
+
+        storage::bump_instance_ttl(&env);
+    }
+
     // -----------------------------------------------------------------------
     // Core lifecycle
     // -----------------------------------------------------------------------
@@ -1269,8 +1426,15 @@ impl WillContract {
     }
 
     /// Batch check-in across multiple wills in a single transaction.
-    /// All wills must be owned by `owner` and in `Active` status.
-    /// Panics if any will ID is invalid, not owned by `owner`, or not `Active`.
+    /// All wills must be owned or delegated to `caller` and in `Active` status.
+    /// Panics if any will ID is invalid, not owned or delegated to `caller`,
+    /// or not `Active`.
+    ///
+    /// Mirrors the single-will `check_in` entrypoint: `caller` may be either
+    /// the will's owner or the will's authorized delegate. This allows
+    /// automated delegates (e.g. hot-wallet cron jobs managing multiple wills
+    /// for a principal) to batch check-ins without forcing individual calls
+    /// per will (#3).
     ///
     /// At most `batch_check_in_limit::MAX_BATCH_CHECK_IN` (50) IDs are accepted
     /// per call; longer inputs panic with [`WillError::BatchTooLarge`]. Every ID
@@ -1284,10 +1448,11 @@ impl WillContract {
     ///   `batch_check_in_limit::MAX_BATCH_CHECK_IN` ids are supplied.
     /// - [`WillError::DuplicateWillId`] if the same will id appears more than once.
     /// - [`WillError::WillNotFound`] if any id names no will.
-    /// - [`WillError::NotOwner`] if any of those wills is not owned by `owner`.
+    /// - [`WillError::NotOwner`] if `caller` is neither the owner nor the
+    ///   delegate of any will in the batch.
     /// - [`WillError::WillNotActive`] if any of those wills is not `Active`.
-    pub fn batch_check_in(env: Env, will_ids: Vec<u64>, owner: Address) {
-        owner.require_auth();
+    pub fn batch_check_in(env: Env, will_ids: Vec<u64>, caller: Address) {
+        caller.require_auth();
         batch_check_in_limit::assert_within_limit(&env, will_ids.len());
         // Reject repeats before any storage write, so a batch can never be
         // partially applied and the `batch_checkin` count always matches the
@@ -1297,8 +1462,9 @@ impl WillContract {
         let count = will_ids.len();
 
         for will_id in will_ids.iter() {
-            let mut will = load_owned(&env, will_id, &owner);
+            let mut will = load_will(&env, will_id);
             assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+            assert_owner_or_delegate(&env, &will, &caller);
 
             will.last_checkin = now;
             let next_deadline = checked_add_timestamp(
@@ -1316,14 +1482,14 @@ impl WillContract {
                 will_id,
                 WillStatus::Active,
                 WillStatus::Active,
-                &owner,
+                &caller,
                 symbol_short!("checkin"),
             );
 
-            events::check_in(&env, will_id, &owner, next_deadline);
+            events::check_in(&env, will_id, &caller, next_deadline);
         }
 
-        events::batch_checkin(&env, &owner, &will_ids, count);
+        events::batch_checkin(&env, &caller, &will_ids, count);
         storage::bump_instance_ttl(&env);
     }
 
@@ -2611,6 +2777,18 @@ impl WillContract {
         // allowed because topping it up does not grow the map.
         if will.balances.len() >= MAX_TOKENS && !will.balances.contains_key(token.clone()) {
             panic_with_error!(&env, WillError::InvalidTokenCount);
+        }
+
+        // For tokens not already held by this will, verify that the address
+        // implements the SEP-41 token interface before accepting a transfer.
+        // `create_will` does the same probe via `assert_valid_tokens`; without
+        // it a non-compliant address could be added to `will.balances`, causing
+        // `distribute` to fail during estate release and trapping all funds (#4).
+        // Tokens the will already holds skip the probe — they were validated at
+        // creation time, and skipping the call saves CPU instructions on the
+        // common case of topping up an existing balance.
+        if !will.balances.contains_key(token.clone()) {
+            token::Client::new(&env, &token).decimals();
         }
 
         // Snapshot values needed after state mutation (checks-effects-interactions).
@@ -4583,6 +4761,11 @@ impl WillContract {
     ///   that have already been archived).
     /// - [`WillError::WillNotSettled`] if the will is not `Released`,
     ///   `Cancelled` or `Settled`.
+    /// - [`WillError::UnclaimedHashedBeneficiary`] if the will is `Released`
+    ///   and still contains hashed beneficiaries whose shares have not been
+    ///   claimed via `reveal_and_claim`. Archiving would delete the persistent
+    ///   will entry that `reveal_and_claim` depends on, permanently trapping
+    ///   those reserved funds (#1).
     pub fn archive_will(env: Env, will_id: u64) {
         let will = load_will(&env, will_id);
         // `Settled` is terminal too: `close_will` moves a `Released` will to
@@ -4594,6 +4777,14 @@ impl WillContract {
             && will.status != WillStatus::Settled
         {
             panic_with_error!(&env, WillError::WillNotSettled);
+        }
+
+        // Block archival while any hashed beneficiary share is still unclaimed.
+        // `reveal_and_claim` loads the will by id to verify the commitment; if
+        // archival removed that entry first, those funds would be trapped in the
+        // contract with no retrieval path (#1).
+        if unclaimed_hashed_bps(&will.hashed_beneficiaries) > 0 {
+            panic_with_error!(&env, WillError::UnclaimedHashedBeneficiary);
         }
 
         let reason = match will.status {

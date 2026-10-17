@@ -176,6 +176,7 @@ If you need more than 10 heirs, you can:
 | `get_will_history` | Reads a will's on-chain audit trail (capped at the newest `MAX_HISTORY_ENTRIES` transitions) | `will_id` | `Vec<WillStatusTransition>` |
 | `get_will_history_page` | Reads a bounded, cursor-paged slice of a will's audit trail | `will_id`, `cursor`, `limit` | `Vec<WillStatusTransition>` |
 | `guardian_trigger` | Casts a guardian vote; 2 of 3 forces an early release | `will_id`, `guardian` | — |
+| `guardian_cancel_pending_will` | Allows a guardian quorum to cancel a stalled `PendingConfirmation` will and refund the owner (callable after the confirmation deadline passes) | `will_id`, `guardian` | — |
 
 ### Release safety
 
@@ -344,6 +345,7 @@ disambiguate.
 | 55 | `ArithmeticOverflow` | A timestamp or deadline calculation overflowed `u64`; checked helpers panic with this error rather than wrapping silently (#16). |
 | 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold (#109). |
 | 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner (#19). |
+| 58 | `UnclaimedHashedBeneficiary` | `archive_will` was called on a `Released` will that still contains hashed beneficiaries whose shares have not been claimed via `reveal_and_claim`. Archiving would destroy the will entry that `reveal_and_claim` depends on, permanently trapping those reserved funds (#1). |
 
 ## Contract spec artifact
 
