@@ -178,7 +178,7 @@ fn audit_detects_drift_and_repair_fixes_it() {
 
     // repair_protocol_stats() must overwrite the drifted stored value with
     // the recomputed truth, and return it.
-    let repaired = client.repair_protocol_stats();
+    let repaired = client.repair_protocol_stats(&owner);
     assert_eq!(repaired, real_computed);
 
     let audit_after_repair = client.audit_protocol_stats();
@@ -225,7 +225,7 @@ fn repair_drops_tokens_whose_recomputed_total_is_zero() {
 
     assert!(!client.audit_protocol_stats().consistent);
 
-    let repaired = client.repair_protocol_stats();
+    let repaired = client.repair_protocol_stats(&owner);
     let stale_entry_present = repaired
         .total_locked_by_token
         .iter()
@@ -234,4 +234,41 @@ fn repair_drops_tokens_whose_recomputed_total_is_zero() {
         !stale_entry_present,
         "repair must drop a token entry whose recomputed total is zero, not keep it at zero"
     );
+}
+
+// --- Test for issue #55 ---
+
+#[test]
+fn repair_protocol_stats_requires_caller_auth() {
+    // #55: repair_protocol_stats now takes an explicit `caller: Address` and
+    // calls `caller.require_auth()`. This test verifies the function still
+    // works correctly when called with a valid, authorised caller, and that
+    // the caller address is not constrained to the will owner — any address
+    // that signs the transaction is accepted.
+    let (env, client, _owner, token_address, _contract_id) = setup();
+    let caller = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &_owner,
+        &vec![&env, (token_address.clone(), 100_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &0,
+        &None,
+        &0,
+    );
+
+    // repair_protocol_stats must succeed when called with an authorised
+    // caller (mock_all_auths satisfies the require_auth check).
+    let repaired = client.repair_protocol_stats(&caller);
+    assert_eq!(repaired.active_will_count, 1);
 }
