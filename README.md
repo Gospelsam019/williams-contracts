@@ -176,13 +176,15 @@ If you need more than 10 heirs, you can:
 | `get_will_history` | Reads a will's on-chain audit trail (capped at the newest `MAX_HISTORY_ENTRIES` transitions) | `will_id` | `Vec<WillStatusTransition>` |
 | `get_will_history_page` | Reads a bounded, cursor-paged slice of a will's audit trail | `will_id`, `cursor`, `limit` | `Vec<WillStatusTransition>` |
 | `guardian_trigger` | Casts a guardian vote; 2 of 3 forces an early release | `will_id`, `guardian` | — |
+| `set_delegate` | Sets or clears an optional delegate authorized to call `check_in` on the owner's behalf (`delegate` cannot be the will `owner` or the contract address itself; raises `InvalidDelegate`) | `will_id`, `owner`, `delegate` | — |
 
 ### Release safety
 
 - **One payout per will.** A will is distributed at most once: `release_inheritance`, `guardian_trigger` and the internal `distribute` all refuse a will that is no longer `Active`/`Triggered`. `reveal_and_claim` deducts the hashed beneficiary's share from the will's token balance, so a later release cannot pay it again.
 - **Guardian votes are deduplicated.** Vote weight and count are recomputed from per-guardian records on every vote, so each guardian counts at most once and expired votes drop out; re-voting after expiry refreshes the vote instead of adding to it. The same applies to `guardian_cancel_trigger`.
 - **Keeper bounty comes out of the will.** The bounty is deducted from the estate before the beneficiary split rather than paid on top of it. By default it is deducted **proportionally from every token the will holds** — each token contributes `floor(balance * keeper_bounty_bps / 10_000)` of itself — so a keeper's incentive scales with the estate's whole value instead of whichever token was locked first (#109). The owner can instead concentrate the whole bounty on one token (e.g. the native asset, to cover the keeper's gas) with `set_keeper_bounty_token`.
-- **Balances are conserved.** For every token, bounty plus beneficiary shares must equal the balance exactly, or the release aborts with `DistributionMismatch`. Percentage rounding dust goes to the last percentage beneficiary; for fixed-amount-only wills any leftover (e.g. from `top_up`) goes to the last beneficiary.
+- **Balances are conserved and rounding is deterministic (#32).** For every token, `keeper_bounty + sum(beneficiary_shares) + owner_refund + hashed_reserve == token_balance` strictly holds with zero dust stranded in the contract, or the release aborts with `DistributionMismatch`. Each of the first `N - 1` percentage beneficiaries receives `floor(remaining * basis_points / 10_000)` via integer truncation toward zero, leaving at most `N - 1` stroops of rounding remainder per token. The final `Allocation::Percentage` beneficiary in `will.beneficiaries` deterministically absorbs `percentage_remaining` (their proportional share plus the rounding remainder) across every token held by the will; for `FixedAmount`-only wills, any unallocated remainder is refunded to the will's owner.
+- **Delegate role separation (#31).** `set_delegate` rejects self-delegation (`delegate == owner`) and contract-self-delegation (`delegate == env.current_contract_address()`) with `WillError::InvalidDelegate` (code `58`). Guardians and beneficiaries remain eligible to serve as delegates when the owner wishes to delegate routine `check_in` maintenance, because a delegate's authority is strictly confined to resetting the check-in timer.
 
 `checkin_period_days` and `grace_period_days` passed to `create_will` must each be at least `1` day (and at most `MAX_PERIOD_DAYS`); a value of `0` panics with `WillError::InvalidPeriod`.
 
@@ -344,6 +346,7 @@ disambiguate.
 | 55 | `ArithmeticOverflow` | A timestamp or deadline calculation overflowed `u64`; checked helpers panic with this error rather than wrapping silently (#16). |
 | 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold (#109). |
 | 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner (#19). |
+| 58 | `InvalidDelegate` | `set_delegate` was called with an invalid delegate address (such as the will owner's own address or the contract's own address) (#31). |
 
 ## Contract spec artifact
 

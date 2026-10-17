@@ -67,6 +67,7 @@ available discriminant; existing values are never changed.
 | 55 | `ArithmeticOverflow` | A timestamp or deadline calculation overflowed `u64`; checked helpers panic with this error rather than wrapping silently. |
 | 56 | `InvalidBountyToken` | `set_keeper_bounty_token` named a token the will does not currently hold. |
 | 57 | `NotAuthorized` | `redirect_failed_payout` was called by an address that is neither the recorded failed-payout recipient nor the will's owner. |
+| 58 | `InvalidDelegate` | `set_delegate` was called with an invalid delegate address (such as the will owner's own address or the contract's own address). |
 
 ## Notes
 

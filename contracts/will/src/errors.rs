@@ -256,4 +256,7 @@ pub enum WillError {
     /// recorded failed-payout recipient nor the will's owner. Only those two
     /// parties may move a stalled payout to a recovery address (#19).
     NotAuthorized = 57,
+    /// `set_delegate` was called with an invalid delegate address (such as the
+    /// will owner's own address or the contract's own address) (#31).
+    InvalidDelegate = 58,
 }
