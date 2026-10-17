@@ -949,10 +949,6 @@ pub fn set_guardian_voted(
         .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
 
-/// Recomputes the live `(weight, count)` of release votes for `will` from
-/// storage, counting each guardian at most once and ignoring expired votes.
-///
-
 /// Removes the trigger vote recorded for `guardian` against `will_id`, if any.
 ///
 /// Used by `reject_guardian_role` so a guardian who withdraws consent after

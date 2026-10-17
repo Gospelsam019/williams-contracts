@@ -15,10 +15,7 @@ use soroban_sdk::{
     vec, Address, Env, Vec as SorobanVec,
 };
 
-use crate::{
-    Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient, WillError,
-    WillStatus,
-};
+use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 
 const DAY: u64 = 86_400;
 

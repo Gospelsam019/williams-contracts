@@ -138,8 +138,6 @@ mod issue_355_test;
 #[cfg(test)]
 mod issue_356_test;
 #[cfg(test)]
-mod reset_guardian_consent_test;
-#[cfg(test)]
 // mod issue_357_test; // TODO: ContractEvents API changed in soroban-sdk v28
 /// Regression tests for issues #358-#361: the distinct-token cap in `top_up`,
 /// the shared guardian-vote expiry rule, `limit == 0` pagination parity in
@@ -159,6 +157,8 @@ mod issue_361_test;
 mod issue_378_381_test;
 #[cfg(test)]
 mod issue_414_test;
+#[cfg(test)]
+mod reset_guardian_consent_test;
 
 /// Regression test for issue #424: `get_time_until_deadline` returns a
 /// negative `i64` (not a huge wrapped value) when the deadline is in the past.
@@ -1849,7 +1849,9 @@ impl WillContract {
         } else {
             let owner = match storage::load_will(&env, will_id) {
                 Ok(will) => Some(will.owner),
-                Err(_) => storage::load_archived_will(&env, will_id).ok().map(|w| w.owner),
+                Err(_) => storage::load_archived_will(&env, will_id)
+                    .ok()
+                    .map(|w| w.owner),
             };
             owner.as_ref() == Some(&caller)
         };
@@ -2562,10 +2564,12 @@ impl WillContract {
         // Reset last_checkin to now so the new periods apply from this moment,
         // preventing retroactive expiration if the owner reduces the period below
         // the already elapsed time (#15, #33).
+        let now = env.ledger().timestamp();
         will.last_checkin = now;
         let period_seconds = checked_days_to_seconds(&env, will.checkin_period_days);
         let calculated_deadline = checked_add_timestamp(&env, now, period_seconds);
-        let next_deadline = core::cmp::max(calculated_deadline, checked_add_timestamp(&env, now, 1));
+        let next_deadline =
+            core::cmp::max(calculated_deadline, checked_add_timestamp(&env, now, 1));
         storage::save_will(&env, &will);
 
         events::periods_updated(
@@ -2786,9 +2790,10 @@ impl WillContract {
         // `distribute` to fail during estate release and trapping all funds (#4).
         // Tokens the will already holds skip the probe — they were validated at
         // creation time, and skipping the call saves CPU instructions on the
-        // common case of topping up an existing balance.
-        if !will.balances.contains_key(token.clone()) {
-            token::Client::new(&env, &token).decimals();
+        if !will.balances.contains_key(token.clone())
+            && token::Client::new(&env, &token).try_decimals().is_err()
+        {
+            panic_with_error!(&env, WillError::InvalidToken);
         }
 
         // Snapshot values needed after state mutation (checks-effects-interactions).
@@ -2930,10 +2935,10 @@ impl WillContract {
                 let deadline = checked_deadline_as_i64(&env, trigger_time, will.grace_period_days);
                 Some(deadline - now)
             }
-            WillStatus::PendingConfirmation => will.confirmation_deadline.map(|dl| (dl as i64) - now),
-            WillStatus::Released
-            | WillStatus::Cancelled
-            | WillStatus::Settled => None,
+            WillStatus::PendingConfirmation => {
+                will.confirmation_deadline.map(|dl| (dl as i64) - now)
+            }
+            WillStatus::Released | WillStatus::Cancelled | WillStatus::Settled => None,
         }
     }
 
@@ -3554,7 +3559,11 @@ impl WillContract {
         // restart the check-in clock (#373) -- same rule `emergency_checkin`
         // enforces, so a guardian quorum and the owner are held to one deadline.
         let trigger_time = will.trigger_time.unwrap_or(0);
-        let grace_deadline = checked_add_timestamp(&env, trigger_time, checked_days_to_seconds(&env, will.grace_period_days));
+        let grace_deadline = checked_add_timestamp(
+            &env,
+            trigger_time,
+            checked_days_to_seconds(&env, will.grace_period_days),
+        );
         if now > grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
@@ -4779,11 +4788,13 @@ impl WillContract {
             panic_with_error!(&env, WillError::WillNotSettled);
         }
 
-        // Block archival while any hashed beneficiary share is still unclaimed.
-        // `reveal_and_claim` loads the will by id to verify the commitment; if
-        // archival removed that entry first, those funds would be trapped in the
-        // contract with no retrieval path (#1).
-        if unclaimed_hashed_bps(&will.hashed_beneficiaries) > 0 {
+        // Block archival while any hashed beneficiary share is still unclaimed
+        // on a Released will. `reveal_and_claim` loads the will by id to verify
+        // the commitment; if archival removed that entry first, those funds would
+        // be trapped in the contract with no retrieval path (#1).
+        if will.status == WillStatus::Released
+            && unclaimed_hashed_bps(&will.hashed_beneficiaries) > 0
+        {
             panic_with_error!(&env, WillError::UnclaimedHashedBeneficiary);
         }
 
@@ -6091,13 +6102,6 @@ fn grace_deadline(env: &Env, will: &Will) -> u64 {
     checked_add_timestamp(env, start, grace_seconds)
 }
 
-/// Counts the live votes on `will` and returns `(vote_count, vote_weight)`.
-/// A vote is live only if it was cast by a guardian on the *current* list who
-/// has accepted the role and whose vote has not expired.
-///
-/// `has_voted` selects the namespace: [`storage::has_guardian_voted`] for
-/// release votes or [`storage::has_guardian_cancel_voted`] for cancel votes.
-
 /// Asserts both periods are at least one day and at most [`MAX_PERIOD_DAYS`].
 ///
 /// The upper bound keeps `days * SECONDS_PER_DAY` well inside `u64`. The lower
@@ -6430,6 +6434,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             Some(v) => v,
             None => panic_with_error!(env, WillError::DistributionMismatch),
         };
+        if let Some(reserve) = hashed_reserves.get(token_addr.clone()) {
+            planned = match planned.checked_add(reserve) {
+                Some(v) => v,
+                None => panic_with_error!(env, WillError::DistributionMismatch),
+            };
+        }
         if planned != total {
             panic_with_error!(env, WillError::DistributionMismatch);
         }

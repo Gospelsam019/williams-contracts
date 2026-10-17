@@ -14,12 +14,10 @@ use soroban_sdk::{
     contract, contractimpl,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, Vec as SorobanVec,
+    vec, Address, Env,
 };
 
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError};
-
-const DAY: u64 = 86_400;
 
 /// A contract that deliberately does not implement the SEP-41 token interface
 /// (no `decimals()`, no `transfer()`). Used to verify that `top_up` rejects
@@ -60,10 +58,6 @@ fn setup<'a>() -> (
         TokenClient::new(&env, &token_address),
         token_address,
     )
-}
-
-fn advance(env: &Env, days: u64) {
-    env.ledger().with_mut(|l| l.timestamp += days * DAY);
 }
 
 fn make_will<'a>(

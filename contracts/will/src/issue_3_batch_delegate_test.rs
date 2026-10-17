@@ -12,7 +12,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env, Vec as SorobanVec,
+    vec, Address, Env,
 };
 
 use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
