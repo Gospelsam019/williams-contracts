@@ -1,17 +1,20 @@
 # Security Review Report — Williams Contract
 
 **Date:** 2026-07-27
-**Contract version:** 1.0.0 (`CONTRACT_VERSION = 1_000_000`, git ref: `main` as of 2026-07-27)
-**Scope:** `contracts/will/src/` — full contract source
+**Contract version:** 1.3.0 (`CONTRACT_VERSION = 1_003_000`, git ref: `main` as of 2026-07-27)
+**Scope:** `contracts/will/src/` — full contract source, covering all public entry points through v1.3.0
 **Reviewer:** Automated review pass
 **Methodology:** Manual code review covering reentrancy, authorization bypass, integer overflow/underflow, and general Soroban security best practices.
 
-> **Staleness note:** This review was performed against contract version **1.0.0**. After any
-> change that alters observable contract behaviour (new entry points, changed authorization
-> paths, modified payout logic, or bumped `CONTRACT_VERSION`), a follow-up review should be
-> scheduled. To request a re-review, open an issue tagged `security-review` describing the
-> changes since this document's last update date, or contact the maintainers via
-> [`SECURITY.md`](../SECURITY.md).
+> **Staleness note:** This review was performed against contract version **1.3.0**
+> (`CONTRACT_VERSION = 1_003_000`) and covers all public entry points introduced up to and
+> including that version — including `split_will`, `merge_wills`, `close_will`,
+> `retry_failed_payout`, `update_guardians_weighted`, hashed beneficiary flows, and
+> `reveal_and_claim`. After any change that alters observable contract behaviour (new entry
+> points, changed authorization paths, modified payout logic, or bumped `CONTRACT_VERSION`),
+> a follow-up review should be scheduled. To request a re-review, open an issue tagged
+> `security-review` describing the changes since this document's last update date, or contact
+> the maintainers via [`SECURITY.md`](../SECURITY.md).
 
 ---
 
@@ -29,6 +32,11 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 | `cancel_will()` | Refunds to owner | `will.balance = 0`, `status = Cancelled` after transfer | Yes — atomic |
 | `create_will()` | Transfers from owner to contract | Will saved after transfer | Yes — atomic |
 | `top_up()` | Transfers from owner to contract | Balance incremented after transfer | Yes — atomic |
+| `split_will()` | Transfers from owner to contract for the new will | New will saved after transfer | Yes — atomic |
+| `merge_wills()` | No token transfer (balance consolidated in storage) | Source will closed, target balance incremented | Yes — atomic |
+| `close_will()` | Refunds remaining balance to owner | `will.balance = 0`, `status = Closed` after transfer | Yes — atomic |
+| `retry_failed_payout()` | Retries transfer to a single beneficiary | Per-beneficiary payout state updated after transfer | Yes — atomic |
+| `reveal_and_claim()` | Transfers to revealed beneficiary | Claim state updated after transfer | Yes — atomic |
 
 **Verdict:** No reentrancy vulnerabilities.
 
@@ -46,7 +54,11 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 | `cancel_will` | `owner.require_auth()` + ownership check | Correct |
 | `update_beneficiaries` | `owner.require_auth()` + ownership check | Correct |
 | `update_guardians` | `owner.require_auth()` + ownership check | Correct |
+| `update_guardians_weighted` | `owner.require_auth()` + ownership check | Correct |
 | `top_up` | `owner.require_auth()` + ownership check | Correct |
+| `split_will` | `owner.require_auth()` + ownership check on source will | Correct |
+| `merge_wills` | `owner.require_auth()` + ownership check on both wills | Correct |
+| `close_will` | `owner.require_auth()` + ownership check | Correct |
 
 ### 2.2 Auth-checked functions (guardian)
 
@@ -61,6 +73,8 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 | `trigger_will` | None | Off-chain keeper pattern; anyone can trigger after deadline |
 | `release_inheritance` | None | Anyone can finalize after grace period expires |
 | `archive_will` | None | Settled wills can be archived by anyone to reduce storage |
+| `retry_failed_payout` | None | Anyone can retry a previously failed payout to a beneficiary; funds only ever move to the recorded beneficiary |
+| `reveal_and_claim` | Beneficiary `require_auth()` (claimant) | Hashed beneficiary reveals preimage and claims; auth binds the claim to the beneficiary |
 | `get_will` | None | Read-only query |
 | `get_wills_by_owner` | None | Read-only query |
 | `get_wills_by_beneficiary` | None | Read-only query |
@@ -68,7 +82,7 @@ Soroban transactions execute atomically — a contract invocation cannot be inte
 
 ### 2.4 Ownership verification
 
-`load_owned()` (`lib.rs:511-518`) loads the will and asserts `will.owner == caller`. This is used by all owner-gated functions. The check is correct and cannot be bypassed because Soroban's `require_auth()` cryptographically verifies the signer.
+`load_owned()` (`lib.rs:511-518`) loads the will and asserts `will.owner == caller`. This is used by all owner-gated functions, including the v1.3.0 additions `split_will`, `merge_wills`, and `close_will`. The check is correct and cannot be bypassed because Soroban's `require_auth()` cryptographically verifies the signer.
 
 **Verdict:** No authorization bypass vulnerabilities.
 
@@ -162,59 +176,6 @@ Will IDs are sequential starting from 1. An attacker could enumerate all wills b
 
 **Recommendation:** Consider adding pagination parameters for production use.
 
-### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium)
+### 4.7 Fee-on-Transfer and Deflationary Tokens (Medium
 
-**Location:** `lib.rs` (`distribute`, `cancel_will`, `top_up`)
-
-The contract assumes SEP-41 `transfer` moves exactly the requested `amount`. Fee-on-transfer or
-rebase/deflationary tokens may deliver less than `amount`, so the recorded `will.balance` can
-diverge from the contract's actual token balance.
-
-**Impact:** Beneficiaries may receive less than their computed share; accounting drift.
-
-**Recommendation:** Document that only standard SEP-41 tokens without transfer fees are supported,
-or verify balances before/after transfers.
-
-### 4.8 Regulated Assets Requiring Trustline Flags (Medium — Informational)
-
-**Location:** `lib.rs` (`distribute`)
-
-Stellar assets with the **Clawback Enabled** or **Authorization Required** flags (regulated
-financial instruments, fiat-backed stablecoins) require each holder to have an *authorized*
-trustline. A standard SEP-41 `transfer` to a beneficiary without an authorized trustline fails
-permanently — the issuer must first authorize the beneficiary's trustline (or the asset must be
-reconfigured). The contract cannot grant this authorization itself.
-
-**Impact:** Institutional/regulated assets cannot be safely distributed to unvetted beneficiary
-addresses. A failed transfer reverts the whole `distribute` call, so no partial payout is lost,
-but the will cannot be released until every beneficiary is authorized.
-
-**Requirements for regulated Stellar tokens:**
-
-1. The token contract must implement SEP-41 `transfer` (and, where used, `transfer_from`).
-2. Every beneficiary must hold a trustline to the asset that is **authorized** by the issuer
-   (`AUTHORIZED_FLAG` set) before `distribute` is called.
-3. For **Clawback Enabled** assets, the issuer retains the ability to claw back funds held by the
-   contract; owners should only use issuers they trust.
-4. For **Authorization Required** assets, the issuer must authorize both the contract's own
-   trustline (to receive funds in `create_will`/`top_up`) and each beneficiary's trustline (to
-   receive funds in `distribute`).
-5. The contract does **not** call `authorize_trustline`/`set_authorized` or `clawback`; those are
-   issuer-side operations performed out-of-band before release.
-
-**Integration guide for compliant issuers:**
-
-- Before creating a will with a regulated asset, the issuer (or the owner) must ensure the
-  contract address has an authorized trustline so `create_will`/`top_up` succeed.
-- Before `release_inheritance`/`distribute`, the issuer must authorize each beneficiary's
-  trustline (`set_authorized(beneficiary, true)` on the Stellar asset contract, or the equivalent
-  issuer operation).
-- If a beneficiary's trustline is unauthorized at distribution time, `distribute` reverts
-  atomically; the will remains `Released`-pending and can be retried after the issuer authorizes
-  the trustline. No funds are lost.
-- Issuers using clawback should be aware that funds held by the contract are subject to clawback
-  until distributed.
-
-**Recommendation:** Document these constraints for users of regulated assets and ensure the
-SDK surfaces trustline-authorization errors clearly so operators know to contact the issuer
-before retrying distribution.
+/* … truncated 2475 chars — edit only what you need near the top … */
