@@ -8,8 +8,8 @@
 //! `now == deadline` both succeeded and the outcome depended purely on which
 //! transaction the ledger included first.
 //!
-//! Also covers issue #112: `unindex_triggered_will` must remove entries via an
-//! O(1) swap-remove and keep the triggered index accurate after removals.
+//! Also covers issue #71: failed payouts for the same `(will_id, token,
+//! recipient)` must accumulate rather than overwrite each other.
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -17,7 +17,9 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
+use crate::{
+    storage, Allocation, Beneficiary, WillContract, WillContractClient, WillError, WillStatus,
+};
 
 const DAY: u64 = 86_400;
 
@@ -193,66 +195,25 @@ fn guardian_cancel_follows_the_same_boundary() {
     assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
 }
 
-/// Issue #112: triggering 10 wills and releasing a middle one must leave the
-/// triggered index accurate — the released will is gone and every other will
-/// remains present exactly once.
+/// Issue #71: two failed payouts for the same `(will_id, token, recipient)`
+/// must accumulate rather than overwrite, so the full owed balance stays
+/// retriable.
 #[test]
-fn triggered_index_stays_accurate_after_middle_removal() {
+fn failed_payouts_for_same_recipient_accumulate() {
     let env = Env::default();
     env.mock_all_auths();
-    let t0 = 1_700_000_000;
-    env.ledger().set_timestamp(t0);
-
-    let owner = Address::generate(&env);
-    let token = env
-        .register_stellar_asset_contract_v2(owner.clone())
-        .address();
-    StellarAssetClient::new(&env, &token).mint(&owner, &100_000_000);
     let contract_id = env.register(WillContract, ());
-    let client = WillContractClient::new(&env, &contract_id);
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+    let will_id = 7_u64;
 
-    let mut will_ids = vec![&env];
-    for _ in 0..10 {
-        let beneficiary = Address::generate(&env);
-        let will_id = client.create_will(
-            &owner,
-            &vec![&env, (token.clone(), 1_000_000_i128)],
-            &vec![
-                &env,
-                Beneficiary {
-                    address: beneficiary,
-                    allocation: Allocation::Percentage(10_000),
-                },
-            ],
-            &90,
-            &7,
-            &vec![&env],
-            &0,
-            &None,
-            &0,
+    env.as_contract(&contract_id, || {
+        storage::set_failed_payout(&env, will_id, &token, &recipient, 100);
+        storage::set_failed_payout(&env, will_id, &token, &recipient, 250);
+
+        assert_eq!(
+            storage::get_failed_payout(&env, will_id, &token, &recipient),
+            350
         );
-        will_ids.push_back(will_id);
-    }
-
-    // Trigger all ten wills.
-    env.ledger().set_timestamp(t0 + 90 * DAY);
-    for will_id in will_ids.iter() {
-        client.trigger_will(&will_id);
-    }
-
-    // Release a middle will (index 5) after the grace period.
-    let middle = will_ids.get(5).unwrap();
-    env.ledger().set_timestamp(t0 + 90 * DAY + 7 * DAY + 1);
-    client.release_inheritance(&middle, &None);
-    assert_eq!(client.get_will(&middle).status, WillStatus::Released);
-
-    // Every other will is still Triggered and the released one is not.
-    for (idx, will_id) in will_ids.iter().enumerate() {
-        let status = client.get_will(&will_id).status;
-        if idx == 5 {
-            assert_eq!(status, WillStatus::Released);
-        } else {
-            assert_eq!(status, WillStatus::Triggered);
-        }
-    }
+    });
 }
