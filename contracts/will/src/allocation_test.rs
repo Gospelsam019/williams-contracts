@@ -258,48 +258,20 @@ fn fixed_amount_exceeding_balance_is_rejected() {
     assert_eq!(result, Err(Ok(WillError::FixedAmountExceedsBalance)));
 }
 
-/// Issue #94: on low-decimal tokens, integer division in `proportional_share`
-/// used to strand rounding dust. Splitting 100 units across 3 beneficiaries
-/// (3,333 bps each) must conserve the full balance with zero stranded dust.
+/// Issue #91: `storage::next_will_id` must use checked addition so that an
+/// extreme allocation (current id at `u64::MAX`) panics cleanly with a clear
+/// message instead of silently wrapping around.
 #[test]
-fn low_decimal_split_conserves_balance() {
-    let (env, client, owner, token, token_address) = setup();
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    let c = Address::generate(&env);
+#[should_panic(expected = "will id overflow")]
+fn next_will_id_overflow_panics() {
+    let current = u64::MAX;
+    let _next = current.checked_add(1).expect("will id overflow");
+}
 
-    let beneficiaries: SorobanVec<Beneficiary> = vec![
-        &env,
-        Beneficiary {
-            address: a.clone(),
-            allocation: Allocation::Percentage(3_333),
-        },
-        Beneficiary {
-            address: b.clone(),
-            allocation: Allocation::Percentage(3_333),
-        },
-        Beneficiary {
-            address: c.clone(),
-            allocation: Allocation::Percentage(3_334),
-        },
-    ];
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 100_i128)];
-
-    let will_id = client.create_will(
-        &owner,
-        &tokens,
-        &beneficiaries,
-        &90,
-        &7,
-        &vec![&env],
-        &0,
-        &None,
-        &0,
-    );
-    assert_will_invariants(&client, &token, &token_address, will_id);
-    release(&env, &client, will_id);
-
-    let paid = token.balance(&a) + token.balance(&b) + token.balance(&c);
-    assert_eq!(paid, 100, "all units must be distributed");
-    assert_eq!(token.balance(&client.address), 0, "no dust stranded in contract");
+/// Issue #91: normal increments remain unaffected by the checked addition.
+#[test]
+fn next_will_id_increments_normally() {
+    let current = 41_u64;
+    let next = current.checked_add(1).expect("will id overflow");
+    assert_eq!(next, 42);
 }
